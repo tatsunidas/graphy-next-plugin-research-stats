@@ -6,7 +6,11 @@ import { runRecipe, type RunRecord } from "../core/engine";
 import { kmPointsCsv, r1ResultsCsv } from "../core/exportR1";
 import { methodText } from "../core/methodText";
 import type { Locale, ParamValue, Recipe } from "../core/recipe";
-import { DATASET_CHECK, R1_PROGNOSIS, type R1State } from "../core/recipes";
+import { DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, type R1State, type R2State } from "../core/recipes";
+import { R1_DEFAULTS } from "../core/r1";
+import { R2_DEFAULTS } from "../core/r2";
+import { r2CurvesCsv, r2ResultsCsv, treeCsv } from "../core/exportR2";
+import { r2Panel } from "./r2View";
 import { r1Panel } from "./r1View";
 import { suggestColumns } from "../core/suggest";
 import { download, h } from "./dom";
@@ -29,7 +33,7 @@ interface State {
   progress: { label: string; fraction: number } | null;
   cancelled: boolean;
   selectedFeature: string | null;
-  result: { record: RunRecord; dataset: Dataset | null; report: JoinReport | null; r1: R1State | null } | null;
+  result: { record: RunRecord; dataset: Dataset | null; report: JoinReport | null; r1: R1State | null; r2: R2State | null } | null;
 }
 
 async function readSource(file: File): Promise<TableSource> {
@@ -41,7 +45,7 @@ async function readSource(file: File): Promise<TableSource> {
 /** 研究統計のウィンドウの中身を組み立てる。 */
 export function mountWizard(root: HTMLElement, locale: Locale): void {
   const t = makeT(locale);
-  const s: State = { features: [], clinical: null, baseline: [], followup: [], errors: [], params: { ...R1_PROGNOSIS.defaults }, seed: 1, noSha: false, recipe: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, result: null };
+  const s: State = { features: [], clinical: null, baseline: [], followup: [], errors: [], params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS }, seed: 1, noSha: false, recipe: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, result: null };
   root.replaceChildren();
   const wrap = h("div", { class: "rs-root", "data-testid": "rs-root" });
   root.append(h("style", {}, CSS), wrap);
@@ -65,7 +69,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         h("input", { type: "number", min: 0, step: 1, value: s.seed, "data-testid": "rs-seed", onchange: (e: Event) => { s.seed = Math.max(0, Math.floor(Number((e.target as HTMLInputElement).value) || 0)); } }),
       ),
       h("div", { class: "rs-row" },
-        h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: !(s.features.length && s.clinical) || s.progress !== null, onclick: run }, s.recipe.id === R1_PROGNOSIS.id ? t("runR1") : t("run")),
+        h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: !(s.features.length && s.clinical) || s.progress !== null, onclick: run }, s.recipe.id === DATASET_CHECK.id ? t("run") : t("runR1")),
         s.progress !== null ? h("button", { "data-testid": "rs-cancel", onclick: () => { s.cancelled = true; } }, t("cancel")) : null,
         !(s.features.length && s.clinical) ? h("span", { class: "rs-note" }, t("pickFirst")) : null,
       ),
@@ -188,13 +192,54 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       }));
   }
 
+  /** 結果ラベルの列にある値（陽性とするラベルの選択肢）。 */
+  function outcomeValues(): string[] {
+    const col = s.params.outcomeColumn as string | null;
+    const tb = s.clinical?.table;
+    if (!col || !tb) return [];
+    const j = tb.header.indexOf(col);
+    if (j < 0) return [];
+    return [...new Set(tb.rows.map((r) => String(r[j] ?? "").trim()).filter((x) => x !== ""))].sort();
+  }
+
+  function r2Controls(): HTMLElement[] {
+    const p = s.params;
+    const labels = outcomeValues();
+    const pos = h("select", { "data-testid": "rs-positive", onchange: (e: Event) => { s.params = { ...s.params, positiveLabel: (e.target as HTMLSelectElement).value || null }; s.result = null; } },
+      h("option", { value: "" }, t("positiveNone")), ...labels.map((l) => h("option", { value: l }, l)));
+    pos.value = typeof p.positiveLabel === "string" && labels.includes(p.positiveLabel) ? p.positiveLabel : "";
+    if (pos.value === "" && p.positiveLabel !== null) s.params = { ...s.params, positiveLabel: null };
+    const choice = (testId: string, label: string, key: string, options: [string, string][]) => {
+      const el = h("select", { "data-testid": testId, onchange: (e: Event) => { s.params = { ...s.params, [key]: (e.target as HTMLSelectElement).value }; s.result = null; render(); } }, ...options.map(([v, l]) => h("option", { value: v }, l)));
+      el.value = String(p[key]);
+      return h("div", { class: "rs-row" }, h("label", {}, label), el);
+    };
+    const out: HTMLElement[] = [
+      h("div", { class: "rs-row" }, h("label", {}, t("positiveLabel")), pos),
+      choice("rs-criterion", t("criterion"), "criterion", [["accuracy", t("cAccuracy")], ["youden", t("cYouden")]]),
+      choice("rs-multiplicity", t("multiplicity"), "multiplicity", [["bh", t("mBh")], ["none", t("mNone")]]),
+      numberRow("rs-alpha", t("alpha"), "alpha", { step: 0.01, min: 0.0001, max: 0.5 }),
+      numberRow("rs-topk", t("topK"), "topK", { step: 1, min: 2, max: 20 }),
+      numberRow("rs-calbins", t("calBins"), "calibrationBins", { step: 1, min: 2, max: 50 }),
+      h("div", { class: "rs-row" }, h("label", {}, t("treeOn")), h("input", { type: "checkbox", checked: p.tree === true, "data-testid": "rs-tree-on", onchange: (e: Event) => { s.params = { ...s.params, tree: (e.target as HTMLInputElement).checked }; s.result = null; render(); } })),
+    ];
+    if (p.tree === true) out.push(
+      numberRow("rs-tree-stop", t("treeStop"), "treeStopRate", { step: 0.01, min: 0, max: 0.5 }),
+      numberRow("rs-tree-min", t("treeMin"), "treeMinNode", { step: 1, min: 2 }),
+      numberRow("rs-tree-depth", t("treeDepth"), "treeMaxDepth", { step: 1, min: 1, max: 20 }),
+      numberRow("rs-mc", t("mcIter"), "mcIterations", { step: 100, min: 100 }),
+    );
+    return out;
+  }
+
   function recipeControls(): HTMLElement {
     const p = s.params;
-    const pick = (id: string) => { s.recipe = id === R1_PROGNOSIS.id ? R1_PROGNOSIS : DATASET_CHECK; s.result = null; render(); };
+    const pick = (id: string) => { s.recipe = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION].find((r) => r.id === id) ?? DATASET_CHECK; s.result = null; s.selectedFeature = null; render(); };
     const sel = h("select", { "data-testid": "rs-recipe", onchange: (e: Event) => pick((e.target as HTMLSelectElement).value) },
-      h("option", { value: DATASET_CHECK.id }, t("recipeCheck")), h("option", { value: R1_PROGNOSIS.id }, t("recipeR1")));
+      h("option", { value: DATASET_CHECK.id }, t("recipeCheck")), h("option", { value: R1_PROGNOSIS.id }, t("recipeR1")), h("option", { value: R2_DISCRIMINATION.id }, t("recipeR2")));
     sel.value = s.recipe.id;
     const out: Node[] = [h("div", { class: "rs-row" }, h("label", {}, t("recipe")), sel)];
+    if (s.recipe.id === R2_DISCRIMINATION.id) return h("div", {}, ...out, ...r2Controls());
     if (s.recipe.id !== R1_PROGNOSIS.id) return h("div", {}, ...out);
     const choice = (testId: string, label: string, key: string, options: [string, string][]) => {
       const el = h("select", { "data-testid": testId, onchange: (e: Event) => { s.params = { ...s.params, [key]: (e.target as HTMLSelectElement).value }; s.result = null; render(); } },
@@ -241,8 +286,9 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         },
       );
       const r1 = (state.r1 as R1State | undefined) ?? null;
+      const r2 = (state.r2 as R2State | undefined) ?? null;
       s.selectedFeature = null;
-      s.result = { record, dataset: (state.dataset as Dataset | undefined) ?? null, report: (state.report as JoinReport | undefined) ?? null, r1 };
+      s.result = { record, dataset: (state.dataset as Dataset | undefined) ?? null, report: (state.report as JoinReport | undefined) ?? null, r1, r2 };
     } catch (e) {
       s.errors.push(String(e instanceof Error ? e.message : e));
     }
@@ -283,12 +329,16 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
           : h("div", { class: "rs-note", "data-testid": "rs-no-missing" }, t("noMissing")),
         list(t("exclusions"), rep.exclusions.map((x) => `${x.id}: ${x.reason}`), "rs-exclusions"),
       ) : null,
+      r.r2 && r.r2.rows.length ? r2Panel(r.r2, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
       r.r1 && r.r1.rows.length ? r1Panel(r.r1, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
       h("h2", {}, t("step4")),
       h("div", { class: "rs-row" },
         h("button", { "data-testid": "rs-save-data", disabled: !r.dataset, onclick: () => r.dataset && download(datasetCsv(r.dataset, (s.params.clinicalIdColumn as string) ?? "ID"), "research-stats-dataset.csv", "text/csv;charset=utf-8") }, t("saveData")),
         r.r1 && r.r1.rows.length ? h("button", { "data-testid": "rs-save-results", onclick: () => download(r1ResultsCsv(r.r1!.rows), "research-stats-r1-results.csv", "text/csv;charset=utf-8") }, t("saveResults")) : null,
         r.r1 && r.r1.rows.length ? h("button", { "data-testid": "rs-save-km", onclick: () => download(kmPointsCsv(r.r1!.context, r.r1!.rows), "research-stats-km-points.csv", "text/csv;charset=utf-8") }, t("saveKm")) : null,
+        r.r2 && r.r2.rows.length ? h("button", { "data-testid": "rs-save-r2-results", onclick: () => download(r2ResultsCsv(r.r2!.rows), "research-stats-r2-results.csv", "text/csv;charset=utf-8") }, t("saveR2Results")) : null,
+        r.r2?.combo && r.r2.combo.rocLoo.length ? h("button", { "data-testid": "rs-save-curves", onclick: () => download(r2CurvesCsv(r.r2!.combo!), "research-stats-r2-curves.csv", "text/csv;charset=utf-8") }, t("saveCurves")) : null,
+        r.r2?.tree ? h("button", { "data-testid": "rs-save-tree", onclick: () => download(treeCsv(r.r2!.tree!.root, r.r2!.context.names), "research-stats-r2-tree.csv", "text/csv;charset=utf-8") }, t("saveTree")) : null,
         h("button", { "data-testid": "rs-save-method", onclick: () => download(methodText(r.record, s.recipe, locale), "research-stats-method.txt", "text/plain;charset=utf-8") }, t("saveMethod")),
         h("button", { "data-testid": "rs-save-record", onclick: () => download(`${JSON.stringify(r.record, null, 2)}\n`, "research-stats-record.json", "application/json") }, t("saveRecord")),
       ),

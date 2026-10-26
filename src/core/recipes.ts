@@ -9,6 +9,11 @@ import {
   analyzeFeature, applyMultiplicity, covariatesOf, isSelected, multivariate, R1_DEFAULTS, readR1Params, survivalCohort,
   type CovariateData, type FeatureContext, type FeatureResult, type MultivariateResult, type R1Params, type SurvivalCohort,
 } from "./r1";
+import {
+  analyzeFeatures, binaryCohort, combination, decisionTree, meetsCriterion, R2_DEFAULTS, readR2Params,
+  type BinaryCohort, type ComboResult, type DiscrimContext, type FeatureRow as DiscrimRow, type R2Params, type TreeResult,
+} from "./r2";
+import { treeNodes } from "./discrim/tree";
 
 const str = (v: ParamValue, name: string): string | null => {
   if (v === null || v === "") return null;
@@ -191,4 +196,100 @@ export const R1_PROGNOSIS: Recipe = {
   ],
 };
 
-export const RECIPES: Recipe[] = [DATASET_CHECK, R1_PROGNOSIS];
+export interface R2State {
+  params: R2Params;
+  cohort: BinaryCohort;
+  context: DiscrimContext;
+  rows: DiscrimRow[];
+  comparisons: number;
+  combo: ComboResult | null;
+  tree: TreeResult | null;
+  treeNote: string | null;
+}
+
+export const R2_DISCRIMINATION: Recipe = {
+  id: "r2-discrimination",
+  title: { ja: "2 群の判別（R2）", en: "Discrimination of two groups (R2)" },
+  question: {
+    ja: "この特徴量で、結果ラベルの 2 群を判別できるか。",
+    en: "Can this feature discriminate the two outcome groups?",
+  },
+  sources: [
+    "Weiss GJ et al. PLoS One 2014 (PMID 24987838)",
+    "Sidhu HS et al. Eur Radiol 2017 (PMID 27620864)",
+  ],
+  defaults: { ...DATASET_CHECK.defaults, ...R2_DEFAULTS },
+  steps: [
+    ...DATASET_CHECK.steps,
+    {
+      id: "outcome",
+      title: { ja: "結果ラベルの確認", en: "Outcome labels" },
+      run(ctx): StepOutcome {
+        const d = ctx.state.dataset as Dataset | undefined;
+        if (!d) return { summary: {}, warnings: [], errors: ["データセットがありません"] };
+        const pr = readR2Params(ctx.params);
+        if ("error" in pr) return { summary: {}, warnings: [], errors: [pr.error] };
+        const cohort = binaryCohort(d, pr.positiveLabel);
+        if ("error" in cohort) return { summary: {}, warnings: [], errors: [cohort.error] };
+        const context: DiscrimContext = {
+          y: cohort.y, labels: cohort.labels, names: d.featureNames,
+          values: d.featureNames.map((_, j) => cohort.patients.map((i) => d.features[i][j])),
+        };
+        ctx.state.r2 = { params: pr, cohort, context, rows: [], comparisons: 0, combo: null, tree: null, treeNote: null } satisfies R2State;
+        const pos = cohort.y.reduce((a, b) => a + b, 0);
+        const warnings = d.ids.length - cohort.patients.length > 0 ? [`結果ラベルが欠けている患者 ${d.ids.length - cohort.patients.length} 人を除きました`] : [];
+        if (pr.multiplicity === "none") warnings.push("多重比較の補正をしません（探索的な解析）");
+        return { summary: { patients: cohort.patients.length, positive: pos, negative: cohort.y.length - pos, positiveLabel: pr.positiveLabel, negativeLabel: cohort.labels[0], features: d.featureNames.length }, warnings };
+      },
+    },
+    {
+      id: "features",
+      title: { ja: "特徴量ごとの ROC", en: "Per-feature ROC" },
+      async run(ctx): Promise<StepOutcome> {
+        const st = ctx.state.r2 as R2State;
+        await ctx.tick("ROC", 0);
+        const { rows, comparisons } = analyzeFeatures(st.context, st.params);
+        st.rows = rows;
+        st.comparisons = comparisons;
+        const failed = rows.filter((r) => r.error !== null).length;
+        return {
+          summary: { features: rows.length, comparisons, failed, selected: rows.filter((r) => meetsCriterion(r, st.params)).length },
+          warnings: failed ? [`${failed} 個の特徴量は解析できませんでした（理由は結果の表にあります。AUC・p は空欄のままで、0 にはしていません）`] : [],
+        };
+      },
+    },
+    {
+      id: "combination",
+      title: { ja: "組み合わせと LOO 検証", en: "Combination and leave-one-out" },
+      async run(ctx): Promise<StepOutcome> {
+        const st = ctx.state.r2 as R2State;
+        const c = await combination(st.context, st.rows, st.params, ctx.tick);
+        st.combo = c;
+        if (c.error) return { summary: {}, warnings: c.notes, errors: [c.error] };
+        return {
+          summary: { features: c.features.join(" + "), nUsed: c.nUsed, apparentAuc: c.apparent?.auc ?? null, looAuc: c.loo?.auc ?? null, looCohort: c.looCohort, looFailed: c.looFailed },
+          warnings: c.notes, skipped: c.features.length === 0,
+        };
+      },
+    },
+    {
+      id: "tree",
+      title: { ja: "決定木", en: "Decision tree" },
+      async run(ctx): Promise<StepOutcome> {
+        const st = ctx.state.r2 as R2State;
+        if (!st.params.tree) return { summary: {}, warnings: [], skipped: true };
+        await ctx.tick("tree", 0);
+        const r = decisionTree(st.context, st.rows, st.params, ctx.rng);
+        if ("note" in r) { st.treeNote = r.note; return { summary: {}, warnings: [r.note], skipped: true }; }
+        st.tree = r;
+        await ctx.tick("tree", 1);
+        return {
+          summary: { candidates: r.candidates.length, nUsed: r.nUsed, nodes: treeNodes(r.root).filter((n) => n.split).length, accuracy: r.perf.accuracy.value },
+          warnings: r.notes,
+        };
+      },
+    },
+  ],
+};
+
+export const RECIPES: Recipe[] = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION];
