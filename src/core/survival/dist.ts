@@ -117,3 +117,25 @@ export function betaQuantile(p: number, a: number, b: number): number {
   }
   return (lo + hi) / 2;
 }
+
+/** F 分布の累積分布（上側は 1 − 値）。 */
+export function fCdf(x: number, d1: number, d2: number): number {
+  if (x <= 0) return 0;
+  return betaCdf((d1 * x) / (d1 * x + d2), d1 / 2, d2 / 2);
+}
+
+/** F 分布の分位点（ベータ分布の分位点から）。 */
+export function fQuantile(p: number, d1: number, d2: number): number {
+  const u = betaQuantile(p, d1 / 2, d2 / 2);
+  return (d2 * u) / (d1 * (1 - u));
+}
+
+/** t 分布の分位点（p は (0, 1)）。 */
+export function tQuantile(p: number, df: number): number {
+  if (!(p > 0 && p < 1)) throw new RangeError(`p must be in (0, 1): ${p}`);
+  if (p === 0.5) return 0;
+  const tail = p > 0.5 ? 1 - p : p;
+  const u = betaQuantile(2 * tail, df / 2, 0.5); // 両側確率 = I_{df/(df+t²)}(df/2, 1/2)
+  const t = Math.sqrt((df * (1 - u)) / u);
+  return p > 0.5 ? t : -t;
+}
