@@ -41,6 +41,23 @@ function r1Lines(record: RunRecord, locale: Locale): string[] {
   return L;
 }
 
+/** R3（再現性）の手順の記録から、解析の方法の文を作る。記録に無い手順は書かない。 */
+function r3Lines(record: RunRecord, locale: Locale): string[] {
+  const cond = record.steps.find((s) => s.id === "conditions" && s.status === "ok"), ic = record.steps.find((s) => s.id === "icc" && s.status === "ok");
+  if (!cond || !ic) return [];
+  const s = ic.summary, mc = record.params.minCategory;
+  if (locale === "ja") {
+    return [
+      `${cond.summary.conditions} 条件の特徴量の表を行 ID で突き合わせ、全条件に揃った ${cond.summary.matched} 行、共通の数値の列 ${cond.summary.features} 個を解析した。特徴量ごとに、二元配置（症例 × 条件）の分散分析から級内相関係数 ICC（absolute agreement、単一測定）と 95% 信頼区間（McGraw–Wong の F 近似）を求め、負の値は 0 に切った。信頼区間の下限が 0.5 未満を poor、0.75 未満を moderate、0.9 以下を good、0.9 超を excellent とした（poor ${s.poor}・moderate ${s.moderate}・good ${s.good}・excellent ${s.excellent}${s.failed ? `、計算できなかった ${s.failed}` : ""}）。`,
+      mc ? `区分が ${mc} より低い特徴量（${s.candidates} 個）を除外の候補とした。` : "除外の基準は設けなかった。",
+    ];
+  }
+  return [
+    `Feature tables from ${cond.summary.conditions} conditions were matched by row ID; ${cond.summary.matched} rows present in every condition and ${cond.summary.features} common numeric columns were analysed. For each feature, the intraclass correlation coefficient (absolute agreement, single measures) and its 95% confidence interval (McGraw–Wong F approximation) were computed from a two-way (subject x condition) analysis of variance; negative values were truncated at zero. Reliability was graded by the lower bound of the confidence interval: below 0.5 poor, below 0.75 moderate, up to 0.9 good, above 0.9 excellent (poor ${s.poor}, moderate ${s.moderate}, good ${s.good}, excellent ${s.excellent}${s.failed ? `, not computable ${s.failed}` : ""}).`,
+    mc ? `Features graded below ${mc} (${s.candidates}) were listed as candidates for exclusion.` : "No exclusion criterion was set.",
+  ];
+}
+
 /** R2（判別）の手順の記録から、解析の方法の文を作る。記録に無い手順は書かない。 */
 function r2Lines(record: RunRecord, locale: Locale): string[] {
   const feat = record.steps.find((s) => s.id === "features" && s.status === "ok");
@@ -83,7 +100,7 @@ export function methodText(record: RunRecord, recipe: Recipe, locale: Locale): s
       if (join.summary.survivalUsable !== null && join.summary.survivalUsable !== undefined) lines.push(`時間とイベントが揃った患者は ${join.summary.survivalUsable} 人であった。`);
       lines.push("欠損は 0 で補わず、欠損のまま扱った（複数病変の平均は欠損を除いて求めた）。");
     }
-    lines.push(...r1Lines(record, "ja"), ...r2Lines(record, "ja"));
+    lines.push(...r1Lines(record, "ja"), ...r2Lines(record, "ja"), ...r3Lines(record, "ja"));
     lines.push(`乱数シード: ${record.seed}。${changed.length ? `既定値から変更した設定: ${changed.join("、")}。` : "設定は既定値のままであった。"}`);
     lines.push("研究用であり、診断・治療の判断に用いない。");
   } else {
@@ -95,7 +112,7 @@ export function methodText(record: RunRecord, recipe: Recipe, locale: Locale): s
       if (join.summary.survivalUsable !== null && join.summary.survivalUsable !== undefined) lines.push(`${join.summary.survivalUsable} patients had both time and event.`);
       lines.push("Missing values were not filled with 0 and were kept missing (the mean over several lesions ignores missing values).");
     }
-    lines.push(...r1Lines(record, "en"), ...r2Lines(record, "en"));
+    lines.push(...r1Lines(record, "en"), ...r2Lines(record, "en"), ...r3Lines(record, "en"));
     lines.push(`Random seed: ${record.seed}. ${changed.length ? `Settings changed from the defaults: ${changed.join("; ")}.` : "All settings were the defaults."}`);
     lines.push("For research use only; not for diagnostic or treatment decisions.");
   }

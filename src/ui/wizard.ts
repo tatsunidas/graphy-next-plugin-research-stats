@@ -6,7 +6,11 @@ import { runRecipe, type RunRecord } from "../core/engine";
 import { kmPointsCsv, r1ResultsCsv } from "../core/exportR1";
 import { methodText } from "../core/methodText";
 import type { Locale, ParamValue, Recipe } from "../core/recipe";
-import { DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, type R1State, type R2State } from "../core/recipes";
+import { DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, type R1State, type R2State, type R3State } from "../core/recipes";
+import { R3_DEFAULTS } from "../core/r3";
+import { blandAltmanCsv, exclusionCsv, r3ResultsCsv } from "../core/exportR3";
+import { blandAltmanFor } from "../core/r3";
+import { r3Panel, type BaChoice } from "./r3View";
 import { R1_DEFAULTS } from "../core/r1";
 import { R2_DEFAULTS } from "../core/r2";
 import { r2CurvesCsv, r2ResultsCsv, treeCsv } from "../core/exportR2";
@@ -33,7 +37,8 @@ interface State {
   progress: { label: string; fraction: number } | null;
   cancelled: boolean;
   selectedFeature: string | null;
-  result: { record: RunRecord; dataset: Dataset | null; report: JoinReport | null; r1: R1State | null; r2: R2State | null } | null;
+  ba: BaChoice;
+  result: { record: RunRecord; dataset: Dataset | null; report: JoinReport | null; r1: R1State | null; r2: R2State | null; r3: R3State | null } | null;
 }
 
 async function readSource(file: File): Promise<TableSource> {
@@ -45,33 +50,35 @@ async function readSource(file: File): Promise<TableSource> {
 /** 研究統計のウィンドウの中身を組み立てる。 */
 export function mountWizard(root: HTMLElement, locale: Locale): void {
   const t = makeT(locale);
-  const s: State = { features: [], clinical: null, baseline: [], followup: [], errors: [], params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS }, seed: 1, noSha: false, recipe: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, result: null };
+  const s: State = { features: [], clinical: null, baseline: [], followup: [], errors: [], params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS, ...R3_DEFAULTS }, seed: 1, noSha: false, recipe: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, ba: { feature: null, a: 0, b: 1 }, result: null };
   root.replaceChildren();
   const wrap = h("div", { class: "rs-root", "data-testid": "rs-root" });
   root.append(h("style", {}, CSS), wrap);
 
   const render = () => {
+    const isR3 = s.recipe.id === R3_REPRODUCIBILITY.id;
+    const canRun = isR3 ? s.features.length >= 2 : !!(s.features.length && s.clinical);
     const items: (Node | null)[] = [
       h("div", { class: "rs-banner", "data-testid": "rs-banner" }, t("banner")),
       h("h2", {}, t("step1")),
-      fileRow("rs-file-features", t("featFiles"), true, async (fs) => { s.features = await load(fs); }),
-      fileRow("rs-file-clinical", t("clinFile"), false, async (fs) => { s.clinical = (await load(fs))[0] ?? null; }),
-      fileRow("rs-file-baseline", t("baseFiles"), true, async (fs) => { s.baseline = await load(fs); }),
-      fileRow("rs-file-followup", t("followFiles"), true, async (fs) => { s.followup = await load(fs); }),
+      fileRow("rs-file-features", isR3 ? t("condFiles") : t("featFiles"), true, async (fs) => { s.features = await load(fs); }),
+      isR3 ? null : fileRow("rs-file-clinical", t("clinFile"), false, async (fs) => { s.clinical = (await load(fs))[0] ?? null; }),
+      isR3 ? null : fileRow("rs-file-baseline", t("baseFiles"), true, async (fs) => { s.baseline = await load(fs); }),
+      isR3 ? null : fileRow("rs-file-followup", t("followFiles"), true, async (fs) => { s.followup = await load(fs); }),
       ...s.errors.map((e) => h("div", { class: "rs-err", "data-testid": "rs-read-error" }, e)),
       ...loadedNotes(),
       s.noSha ? h("div", { class: "rs-note" }, t("sha")) : null,
       h("h2", {}, t("step2")),
-      mapping(),
+      isR3 ? r3Mapping() : mapping(),
       recipeControls(),
       h("div", { class: "rs-row" },
         h("label", {}, t("seed")),
         h("input", { type: "number", min: 0, step: 1, value: s.seed, "data-testid": "rs-seed", onchange: (e: Event) => { s.seed = Math.max(0, Math.floor(Number((e.target as HTMLInputElement).value) || 0)); } }),
       ),
       h("div", { class: "rs-row" },
-        h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: !(s.features.length && s.clinical) || s.progress !== null, onclick: run }, s.recipe.id === DATASET_CHECK.id ? t("run") : t("runR1")),
+        h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: !canRun || s.progress !== null, onclick: run }, s.recipe.id === DATASET_CHECK.id ? t("run") : t("runR1")),
         s.progress !== null ? h("button", { "data-testid": "rs-cancel", onclick: () => { s.cancelled = true; } }, t("cancel")) : null,
-        !(s.features.length && s.clinical) ? h("span", { class: "rs-note" }, t("pickFirst")) : null,
+        !canRun ? h("span", { class: "rs-note" }, t("pickFirst")) : null,
       ),
       s.progress !== null
         ? h("div", { "data-testid": "rs-progress" },
@@ -130,6 +137,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       timeColumn: sug.time,
       eventColumn: sug.event,
       outcomeColumn: sug.outcome,
+      reliabilityIdColumn: sug.featureId || null,
       covariates: [],
     };
   }
@@ -232,13 +240,26 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     return out;
   }
 
+  function r3Mapping(): HTMLElement {
+    const fh = s.features[0]?.table.header ?? [];
+    return h("div", {}, select("rs-r3-id", t("condId"), fh, s.params.reliabilityIdColumn as string | null, null, (v) => { s.params = { ...s.params, reliabilityIdColumn: v }; s.result = null; render(); }));
+  }
+
+  function r3Controls(): HTMLElement[] {
+    const el = h("select", { "data-testid": "rs-min-category", onchange: (e: Event) => { s.params = { ...s.params, minCategory: (e.target as HTMLSelectElement).value || null }; s.result = null; } },
+      h("option", { value: "" }, t("mcNone")), ...["moderate", "good", "excellent"].map((c) => h("option", { value: c }, c)));
+    el.value = typeof s.params.minCategory === "string" ? s.params.minCategory : "";
+    return [h("div", { class: "rs-row" }, h("label", {}, t("minCategory")), el)];
+  }
+
   function recipeControls(): HTMLElement {
     const p = s.params;
-    const pick = (id: string) => { s.recipe = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION].find((r) => r.id === id) ?? DATASET_CHECK; s.result = null; s.selectedFeature = null; render(); };
+    const pick = (id: string) => { s.recipe = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY].find((r) => r.id === id) ?? DATASET_CHECK; s.result = null; s.selectedFeature = null; render(); };
     const sel = h("select", { "data-testid": "rs-recipe", onchange: (e: Event) => pick((e.target as HTMLSelectElement).value) },
-      h("option", { value: DATASET_CHECK.id }, t("recipeCheck")), h("option", { value: R1_PROGNOSIS.id }, t("recipeR1")), h("option", { value: R2_DISCRIMINATION.id }, t("recipeR2")));
+      h("option", { value: DATASET_CHECK.id }, t("recipeCheck")), h("option", { value: R1_PROGNOSIS.id }, t("recipeR1")), h("option", { value: R2_DISCRIMINATION.id }, t("recipeR2")), h("option", { value: R3_REPRODUCIBILITY.id }, t("recipeR3")));
     sel.value = s.recipe.id;
     const out: Node[] = [h("div", { class: "rs-row" }, h("label", {}, t("recipe")), sel)];
+    if (s.recipe.id === R3_REPRODUCIBILITY.id) return h("div", {}, ...out, ...r3Controls());
     if (s.recipe.id === R2_DISCRIMINATION.id) return h("div", {}, ...out, ...r2Controls());
     if (s.recipe.id !== R1_PROGNOSIS.id) return h("div", {}, ...out);
     const choice = (testId: string, label: string, key: string, options: [string, string][]) => {
@@ -266,7 +287,8 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
   }
 
   async function run() {
-    if (!s.clinical || !s.features.length || s.progress !== null) return;
+    const needsClinical = s.recipe.id !== R3_REPRODUCIBILITY.id;
+    if ((needsClinical && !s.clinical) || !s.features.length || s.progress !== null) return;
     const recipe = s.recipe;
     const params: Record<string, ParamValue> = { ...s.params };
     for (const k of Object.keys(params)) if (!(k in recipe.defaults)) delete params[k];
@@ -277,7 +299,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     try {
       const { record, state } = await runRecipe(
         recipe,
-        { features: s.features, clinical: s.clinical, baseline: s.baseline, followup: s.followup },
+        { features: s.features, clinical: needsClinical ? (s.clinical ?? undefined) : undefined, baseline: s.baseline, followup: s.followup },
         params,
         {
           seed: s.seed, pluginVersion: VERSION, now: () => new Date().toISOString(),
@@ -287,8 +309,9 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       );
       const r1 = (state.r1 as R1State | undefined) ?? null;
       const r2 = (state.r2 as R2State | undefined) ?? null;
+      const r3 = (state.r3 as R3State | undefined) ?? null;
       s.selectedFeature = null;
-      s.result = { record, dataset: (state.dataset as Dataset | undefined) ?? null, report: (state.report as JoinReport | undefined) ?? null, r1, r2 };
+      s.result = { record, dataset: (state.dataset as Dataset | undefined) ?? null, report: (state.report as JoinReport | undefined) ?? null, r1, r2, r3 };
     } catch (e) {
       s.errors.push(String(e instanceof Error ? e.message : e));
     }
@@ -314,7 +337,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     const list = (title: string, xs: string[], testId: string) =>
       xs.length ? h("details", { "data-testid": testId }, h("summary", {}, `${title}（${xs.length}）`), h("ul", {}, ...xs.map((x) => h("li", {}, x)))) : null;
     return h("div", { "data-testid": "rs-result" },
-      h("h2", {}, t("step3")),
+      r.record.recipeId === R3_REPRODUCIBILITY.id ? null : h("h2", {}, t("step3")),
       failed.length ? h("div", { class: "rs-err", "data-testid": "rs-errors" }, h("b", {}, t("errors")), h("ul", {}, ...failed.map((e) => h("li", {}, e)))) : null,
       warns.length ? h("div", { class: "rs-warn", "data-testid": "rs-warnings" }, h("b", {}, t("warnings")), h("ul", {}, ...warns.map((e) => h("li", {}, e)))) : null,
       rep ? h("div", {},
@@ -329,13 +352,22 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
           : h("div", { class: "rs-note", "data-testid": "rs-no-missing" }, t("noMissing")),
         list(t("exclusions"), rep.exclusions.map((x) => `${x.id}: ${x.reason}`), "rs-exclusions"),
       ) : null,
+      r.r3 && r.r3.rows.length ? r3Panel(r.r3, t, s.ba, (c) => { s.ba = c; render(); }) : null,
       r.r2 && r.r2.rows.length ? r2Panel(r.r2, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
       r.r1 && r.r1.rows.length ? r1Panel(r.r1, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
       h("h2", {}, t("step4")),
       h("div", { class: "rs-row" },
-        h("button", { "data-testid": "rs-save-data", disabled: !r.dataset, onclick: () => r.dataset && download(datasetCsv(r.dataset, (s.params.clinicalIdColumn as string) ?? "ID"), "research-stats-dataset.csv", "text/csv;charset=utf-8") }, t("saveData")),
+        r.record.recipeId === R3_REPRODUCIBILITY.id ? null : h("button", { "data-testid": "rs-save-data", disabled: !r.dataset, onclick: () => r.dataset && download(datasetCsv(r.dataset, (s.params.clinicalIdColumn as string) ?? "ID"), "research-stats-dataset.csv", "text/csv;charset=utf-8") }, t("saveData")),
         r.r1 && r.r1.rows.length ? h("button", { "data-testid": "rs-save-results", onclick: () => download(r1ResultsCsv(r.r1!.rows), "research-stats-r1-results.csv", "text/csv;charset=utf-8") }, t("saveResults")) : null,
         r.r1 && r.r1.rows.length ? h("button", { "data-testid": "rs-save-km", onclick: () => download(kmPointsCsv(r.r1!.context, r.r1!.rows), "research-stats-km-points.csv", "text/csv;charset=utf-8") }, t("saveKm")) : null,
+        r.r3 && r.r3.rows.length ? h("button", { "data-testid": "rs-save-r3-results", onclick: () => download(r3ResultsCsv(r.r3!.rows), "research-stats-r3-icc.csv", "text/csv;charset=utf-8") }, t("saveR3Results")) : null,
+        r.r3 && r.r3.params.minCategory ? h("button", { "data-testid": "rs-save-exclusion", onclick: () => download(exclusionCsv(r.r3!.candidates, r.r3!.params.minCategory), "research-stats-r3-exclusion-candidates.csv", "text/csv;charset=utf-8") }, t("saveExclusion")) : null,
+        r.r3 && r.r3.rows.length ? h("button", { "data-testid": "rs-save-ba", onclick: () => {
+          const d = r.r3!.data, f = s.ba.feature && d.features.includes(s.ba.feature) ? s.ba.feature : d.features[0], k = d.conditions.length;
+          const a = Math.min(s.ba.a, k - 1), b = s.ba.b === a ? (a + 1) % k : Math.min(s.ba.b, k - 1);
+          const res = blandAltmanFor(d, f, a, b);
+          if (!("error" in res)) download(blandAltmanCsv(res, f, d.conditions[a], d.conditions[b]), "research-stats-r3-bland-altman.csv", "text/csv;charset=utf-8");
+        } }, t("saveBa")) : null,
         r.r2 && r.r2.rows.length ? h("button", { "data-testid": "rs-save-r2-results", onclick: () => download(r2ResultsCsv(r.r2!.rows), "research-stats-r2-results.csv", "text/csv;charset=utf-8") }, t("saveR2Results")) : null,
         r.r2?.combo && r.r2.combo.rocLoo.length ? h("button", { "data-testid": "rs-save-curves", onclick: () => download(r2CurvesCsv(r.r2!.combo!), "research-stats-r2-curves.csv", "text/csv;charset=utf-8") }, t("saveCurves")) : null,
         r.r2?.tree ? h("button", { "data-testid": "rs-save-tree", onclick: () => download(treeCsv(r.r2!.tree!.root, r.r2!.context.names), "research-stats-r2-tree.csv", "text/csv;charset=utf-8") }, t("saveTree")) : null,

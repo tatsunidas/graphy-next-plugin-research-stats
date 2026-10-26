@@ -17,7 +17,7 @@ export interface XySeries {
   label: string;
   /** [x, y] または [x, y, 下限, 上限]（誤差線）。 */
   points: number[][];
-  kind: "line" | "step" | "points";
+  kind: "line" | "step" | "points" | "scatter";
 }
 
 export interface XyOptions {
@@ -51,7 +51,9 @@ export function xyChart(series: XySeries[], o: XyOptions): SVGElement {
   series.forEach((s, k) => {
     const color = COLORS[k % COLORS.length], dash = DASH[k % DASH.length];
     const clip = (v: number) => Math.min(y1, Math.max(y0, v));
-    if (s.kind === "points") {
+    if (s.kind === "scatter") {
+      for (const p of s.points) svg.append(el("circle", { cx: X(p[0]), cy: Y(clip(p[1])), r: 3, fill: color, opacity: 0.65 }));
+    } else if (s.kind === "points") {
       for (const p of s.points) {
         if (p.length >= 4) svg.append(el("line", { x1: X(p[0]), x2: X(p[0]), y1: Y(clip(p[2])), y2: Y(clip(p[3])), stroke: color, "stroke-width": 1.2, opacity: 0.6 }));
         svg.append(el("circle", { cx: X(p[0]), cy: Y(clip(p[1])), r: 3.5, fill: color }));
