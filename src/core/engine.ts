@@ -36,13 +36,17 @@ export interface RunOptions {
   pluginVersion: string;
   /** 開始時刻の文字列。試験で固定できるよう外から渡す。 */
   now: () => string;
+  onProgress?: (stepId: string, label: string, fraction: number) => void;
+  isCancelled?: () => boolean;
 }
+
+export const CANCELLED = "取り消されました";
 
 const same = (a: ParamValue, b: ParamValue) => JSON.stringify(a) === JSON.stringify(b);
 
-export function runRecipe(
+export async function runRecipe(
   recipe: Recipe, inputs: RunInputs, params: Record<string, ParamValue>, opts: RunOptions,
-): { record: RunRecord; state: Record<string, unknown> } {
+): Promise<{ record: RunRecord; state: Record<string, unknown> }> {
   const merged: Record<string, ParamValue> = { ...recipe.defaults, ...params };
   const unknown = Object.keys(params).filter((k) => !(k in recipe.defaults));
   if (unknown.length) throw new Error(`レシピ ${recipe.id} に無い設定です: ${unknown.join(", ")}`);
@@ -62,10 +66,20 @@ export function runRecipe(
   };
   const state: Record<string, unknown> = {};
   const rng = new Rng(opts.seed);
+  let lastYield = Date.now();
   for (const step of recipe.steps) {
     let out: StepOutcome;
+    const tick = async (label: string, fraction: number) => {
+      if (opts.isCancelled?.()) throw new Error(CANCELLED);
+      opts.onProgress?.(step.id, label, fraction);
+      if (Date.now() - lastYield > 12) {
+        await new Promise((r) => setTimeout(r, 0));
+        lastYield = Date.now();
+        if (opts.isCancelled?.()) throw new Error(CANCELLED);
+      }
+    };
     try {
-      out = step.run({ inputs, params: merged, rng, state });
+      out = await step.run({ inputs, params: merged, rng, state, tick });
     } catch (e) {
       out = { summary: {}, warnings: [], errors: [`手順「${step.id}」が例外で止まりました: ${e instanceof Error ? e.message : String(e)}`] };
     }

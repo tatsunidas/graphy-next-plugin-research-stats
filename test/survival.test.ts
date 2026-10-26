@@ -223,15 +223,15 @@ describe("bootstrap-corrected C-index", () => {
     if (!r.ok) return null;
     return (i: number) => cols.reduce((acc, j, a) => acc + c.x[i][j] * r.fit.beta[a], 0);
   };
-  it("is reproducible per seed, and optimism is positive", () => {
-    const a = bootstrapCorrectedC(s, fitAll([0, 1, 2]), 100, new Rng(1)), b = bootstrapCorrectedC(s, fitAll([0, 1, 2]), 100, new Rng(1)), d = bootstrapCorrectedC(s, fitAll([0, 1, 2]), 100, new Rng(2));
+  it("is reproducible per seed, and optimism is positive", async () => {
+    const a = await bootstrapCorrectedC(s, fitAll([0, 1, 2]), 100, new Rng(1)), b = await bootstrapCorrectedC(s, fitAll([0, 1, 2]), 100, new Rng(1)), d = await bootstrapCorrectedC(s, fitAll([0, 1, 2]), 100, new Rng(2));
     if ("error" in a || "error" in b || "error" in d) throw new Error("err");
     expect(a).toEqual(b);
     expect(d.corrected).not.toBe(a.corrected);
     expect(a.optimism).toBeGreaterThan(0);
     expect(a.corrected).toBeLessThan(a.apparent);
   });
-  it("optimism is larger for a model that includes pure-noise covariates", () => {
+  it("optimism is larger for a model that includes pure-noise covariates", async () => {
     const r = new Rng(77);
     const extra = Array.from({ length: s.time.length }, () => Array.from({ length: 12 }, () => r.next()));
     const fit = (idx: number[]) => {
@@ -240,7 +240,7 @@ describe("bootstrap-corrected C-index", () => {
       if (!m.ok) return null;
       return (i: number) => [c.x[i][0], ...extra[i]].reduce((acc, v, a) => acc + v * m.fit.beta[a], 0);
     };
-    const small = bootstrapCorrectedC(s, fitAll([0]), 100, new Rng(9)), big = bootstrapCorrectedC(s, fit, 100, new Rng(9));
+    const small = await bootstrapCorrectedC(s, fitAll([0]), 100, new Rng(9)), big = await bootstrapCorrectedC(s, fit, 100, new Rng(9));
     if ("error" in small || "error" in big) throw new Error("err");
     expect(big.optimism).toBeGreaterThan(small.optimism);
   });

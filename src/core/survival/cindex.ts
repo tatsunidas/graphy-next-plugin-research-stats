@@ -37,7 +37,9 @@ export interface CorrectedC {
  * 元の症例 i のリスクを返す関数を返す。特徴量の選択もこの中に含めること
  * （選択を含めないと楽観を小さく見積もる）。
  */
-export function bootstrapCorrectedC(s: Surv, fit: FitFn, B: number, rng: Rng): CorrectedC | { error: string } {
+export async function bootstrapCorrectedC(
+  s: Surv, fit: FitFn, B: number, rng: Rng, tick?: (done: number, of: number) => Promise<void>,
+): Promise<CorrectedC | { error: string }> {
   const n = s.time.length;
   const all = Array.from({ length: n }, (_, i) => i);
   const full = fit(all);
@@ -46,6 +48,7 @@ export function bootstrapCorrectedC(s: Surv, fit: FitFn, B: number, rng: Rng): C
   if (apparent === null) return { error: "比較できる組がありません" };
   let sum = 0, ok = 0, failed = 0;
   for (let b = 0; b < B; b++) {
+    if (tick) await tick(b, B);
     const idx = Array.from({ length: n }, () => rng.int(n));
     const model = fit(idx);
     if (!model) { failed++; continue; }

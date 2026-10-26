@@ -3,9 +3,11 @@ import { sha256Hex } from "../core/digest";
 import { datasetCsv } from "../core/exportDataset";
 import { defaultFeatureColumns, type Dataset, type JoinReport, type TableSource } from "../core/dataset";
 import { runRecipe, type RunRecord } from "../core/engine";
+import { kmPointsCsv, r1ResultsCsv } from "../core/exportR1";
 import { methodText } from "../core/methodText";
-import type { Locale, ParamValue } from "../core/recipe";
-import { DATASET_CHECK } from "../core/recipes";
+import type { Locale, ParamValue, Recipe } from "../core/recipe";
+import { DATASET_CHECK, R1_PROGNOSIS, type R1State } from "../core/recipes";
+import { r1Panel } from "./r1View";
 import { suggestColumns } from "../core/suggest";
 import { download, h } from "./dom";
 import { makeT, type Key } from "./i18n";
@@ -23,7 +25,11 @@ interface State {
   params: Record<string, ParamValue>;
   seed: number;
   noSha: boolean;
-  result: { record: RunRecord; dataset: Dataset | null; report: JoinReport | null } | null;
+  recipe: Recipe;
+  progress: { label: string; fraction: number } | null;
+  cancelled: boolean;
+  selectedFeature: string | null;
+  result: { record: RunRecord; dataset: Dataset | null; report: JoinReport | null; r1: R1State | null } | null;
 }
 
 async function readSource(file: File): Promise<TableSource> {
@@ -35,7 +41,7 @@ async function readSource(file: File): Promise<TableSource> {
 /** 研究統計のウィンドウの中身を組み立てる。 */
 export function mountWizard(root: HTMLElement, locale: Locale): void {
   const t = makeT(locale);
-  const s: State = { features: [], clinical: null, baseline: [], followup: [], errors: [], params: { ...DATASET_CHECK.defaults }, seed: 1, noSha: false, result: null };
+  const s: State = { features: [], clinical: null, baseline: [], followup: [], errors: [], params: { ...R1_PROGNOSIS.defaults }, seed: 1, noSha: false, recipe: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, result: null };
   root.replaceChildren();
   const wrap = h("div", { class: "rs-root", "data-testid": "rs-root" });
   root.append(h("style", {}, CSS), wrap);
@@ -53,14 +59,21 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       s.noSha ? h("div", { class: "rs-note" }, t("sha")) : null,
       h("h2", {}, t("step2")),
       mapping(),
+      recipeControls(),
       h("div", { class: "rs-row" },
         h("label", {}, t("seed")),
         h("input", { type: "number", min: 0, step: 1, value: s.seed, "data-testid": "rs-seed", onchange: (e: Event) => { s.seed = Math.max(0, Math.floor(Number((e.target as HTMLInputElement).value) || 0)); } }),
       ),
       h("div", { class: "rs-row" },
-        h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: !(s.features.length && s.clinical), onclick: run }, t("run")),
+        h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: !(s.features.length && s.clinical) || s.progress !== null, onclick: run }, s.recipe.id === R1_PROGNOSIS.id ? t("runR1") : t("run")),
+        s.progress !== null ? h("button", { "data-testid": "rs-cancel", onclick: () => { s.cancelled = true; } }, t("cancel")) : null,
         !(s.features.length && s.clinical) ? h("span", { class: "rs-note" }, t("pickFirst")) : null,
       ),
+      s.progress !== null
+        ? h("div", { "data-testid": "rs-progress" },
+          h("div", { class: "rs-note" }, t("running", { label: s.progress.label, pct: Math.round(s.progress.fraction * 100) })),
+          h("div", { class: "rs-progress" }, h("div", { style: `width:${Math.round(s.progress.fraction * 100)}%` })))
+        : null,
       s.result ? resultView(s.result) : null,
     ];
     wrap.replaceChildren(...items.filter((x): x is Node => x !== null));
@@ -160,18 +173,92 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     );
   }
 
-  function run() {
-    if (!s.clinical || !s.features.length) return;
-    const params: Record<string, ParamValue> = { ...s.params };
-    for (const k of Object.keys(params)) if (!(k in DATASET_CHECK.defaults)) delete params[k];
-    const { record, state } = runRecipe(
-      DATASET_CHECK,
-      { features: s.features, clinical: s.clinical, baseline: s.baseline, followup: s.followup },
-      params,
-      { seed: s.seed, pluginVersion: VERSION, now: () => new Date().toISOString() },
+  function numberRow(testId: string, label: string, key: string, opts: { step?: number; min?: number; max?: number; emptyIsNull?: boolean }): HTMLElement {
+    const v = s.params[key];
+    return h("div", { class: "rs-row" },
+      h("label", {}, label),
+      h("input", {
+        type: "number", step: opts.step ?? "any", min: opts.min, max: opts.max, value: v === null || v === undefined ? "" : String(v), "data-testid": testId,
+        onchange: (e: Event) => {
+          const raw = (e.target as HTMLInputElement).value.trim();
+          s.params = { ...s.params, [key]: raw === "" ? (opts.emptyIsNull ? null : NaN) : Number(raw) };
+          s.result = null;
+          render();
+        },
+      }));
+  }
+
+  function recipeControls(): HTMLElement {
+    const p = s.params;
+    const pick = (id: string) => { s.recipe = id === R1_PROGNOSIS.id ? R1_PROGNOSIS : DATASET_CHECK; s.result = null; render(); };
+    const sel = h("select", { "data-testid": "rs-recipe", onchange: (e: Event) => pick((e.target as HTMLSelectElement).value) },
+      h("option", { value: DATASET_CHECK.id }, t("recipeCheck")), h("option", { value: R1_PROGNOSIS.id }, t("recipeR1")));
+    sel.value = s.recipe.id;
+    const out: Node[] = [h("div", { class: "rs-row" }, h("label", {}, t("recipe")), sel)];
+    if (s.recipe.id !== R1_PROGNOSIS.id) return h("div", {}, ...out);
+    const choice = (testId: string, label: string, key: string, options: [string, string][]) => {
+      const el = h("select", { "data-testid": testId, onchange: (e: Event) => { s.params = { ...s.params, [key]: (e.target as HTMLSelectElement).value }; s.result = null; render(); } },
+        ...options.map(([v, l]) => h("option", { value: v }, l)));
+      el.value = String(p[key]);
+      return h("div", { class: "rs-row" }, h("label", {}, label), el);
+    };
+    out.push(
+      choice("rs-group-mode", t("groupMode"), "groupMode", [["median", t("gMedian")], ["value", t("gValue")], ["tertile", t("gTertile")], ["optimal", t("gOptimal")]]),
+      p.groupMode === "value" ? numberRow("rs-group-value", t("groupValue"), "groupValue", { emptyIsNull: true }) : (null as unknown as HTMLElement),
+      choice("rs-multiplicity", t("multiplicity"), "multiplicity", [["bh", t("mBh")], ["none", t("mNone")]]),
+      numberRow("rs-alpha", t("alpha"), "alpha", { step: 0.01, min: 0.0001, max: 0.5 }),
+      p.groupMode === "optimal" ? numberRow("rs-min-fraction", t("minFraction"), "minGroupFraction", { step: 0.05, min: 0.01, max: 0.4 }) : (null as unknown as HTMLElement),
+      p.groupMode === "optimal" ? numberRow("rs-permutations", t("permutations"), "permutations", { step: 100, min: 19 }) : (null as unknown as HTMLElement),
+      numberRow("rs-rmst-tau", t("rmstTau"), "rmstTau", { emptyIsNull: true, min: 0 }),
+      h("div", { class: "rs-row" }, h("label", {}, t("mw")), h("input", { type: "checkbox", checked: p.mannWhitney === true, "data-testid": "rs-mw", onchange: (e: Event) => { s.params = { ...s.params, mannWhitney: (e.target as HTMLInputElement).checked }; s.result = null; } })),
+      numberRow("rs-bootstrap", t("bootstrapB"), "bootstrapB", { step: 100, min: 0 }),
     );
-    s.result = { record, dataset: (state.dataset as Dataset | undefined) ?? null, report: (state.report as JoinReport | undefined) ?? null };
+    if (p.groupMode === "optimal") {
+      const m = defaultFeatureColumns({ header: s.features[0]?.table.header ?? [], rows: s.features.flatMap((x) => x.table.rows) }, [p.featureIdColumn as string | null, p.patientColumn as string | null]).length;
+      if (m) out.push(h("div", { class: "rs-note", "data-testid": "rs-heavy" }, t("heavy", { m, b: Number(p.permutations) })));
+    }
+    return h("div", {}, ...out.filter((x) => x !== null));
+  }
+
+  async function run() {
+    if (!s.clinical || !s.features.length || s.progress !== null) return;
+    const recipe = s.recipe;
+    const params: Record<string, ParamValue> = { ...s.params };
+    for (const k of Object.keys(params)) if (!(k in recipe.defaults)) delete params[k];
+    s.cancelled = false;
+    s.progress = { label: "", fraction: 0 };
+    s.result = null;
     render();
+    try {
+      const { record, state } = await runRecipe(
+        recipe,
+        { features: s.features, clinical: s.clinical, baseline: s.baseline, followup: s.followup },
+        params,
+        {
+          seed: s.seed, pluginVersion: VERSION, now: () => new Date().toISOString(),
+          isCancelled: () => s.cancelled,
+          onProgress: (_id, label, fraction) => { s.progress = { label, fraction }; updateProgress(); },
+        },
+      );
+      const r1 = (state.r1 as R1State | undefined) ?? null;
+      s.selectedFeature = null;
+      s.result = { record, dataset: (state.dataset as Dataset | undefined) ?? null, report: (state.report as JoinReport | undefined) ?? null, r1 };
+    } catch (e) {
+      s.errors.push(String(e instanceof Error ? e.message : e));
+    }
+    s.progress = null;
+    render();
+  }
+
+  /** 進み具合だけを書き換える（全体を描き直すと、実行中に画面が固まる・選択が飛ぶ）。 */
+  function updateProgress() {
+    const box = wrap.querySelector('[data-testid="rs-progress"]');
+    if (!box || !s.progress) return;
+    const pct = Math.round(s.progress.fraction * 100);
+    const note = box.querySelector(".rs-note");
+    const bar = box.querySelector(".rs-progress > div") as HTMLElement | null;
+    if (note) note.textContent = t("running", { label: s.progress.label, pct });
+    if (bar) bar.style.width = `${pct}%`;
   }
 
   function resultView(r: NonNullable<State["result"]>): HTMLElement {
@@ -196,10 +283,13 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
           : h("div", { class: "rs-note", "data-testid": "rs-no-missing" }, t("noMissing")),
         list(t("exclusions"), rep.exclusions.map((x) => `${x.id}: ${x.reason}`), "rs-exclusions"),
       ) : null,
+      r.r1 && r.r1.rows.length ? r1Panel(r.r1, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
       h("h2", {}, t("step4")),
       h("div", { class: "rs-row" },
         h("button", { "data-testid": "rs-save-data", disabled: !r.dataset, onclick: () => r.dataset && download(datasetCsv(r.dataset, (s.params.clinicalIdColumn as string) ?? "ID"), "research-stats-dataset.csv", "text/csv;charset=utf-8") }, t("saveData")),
-        h("button", { "data-testid": "rs-save-method", onclick: () => download(methodText(r.record, DATASET_CHECK, locale), "research-stats-method.txt", "text/plain;charset=utf-8") }, t("saveMethod")),
+        r.r1 && r.r1.rows.length ? h("button", { "data-testid": "rs-save-results", onclick: () => download(r1ResultsCsv(r.r1!.rows), "research-stats-r1-results.csv", "text/csv;charset=utf-8") }, t("saveResults")) : null,
+        r.r1 && r.r1.rows.length ? h("button", { "data-testid": "rs-save-km", onclick: () => download(kmPointsCsv(r.r1!.context, r.r1!.rows), "research-stats-km-points.csv", "text/csv;charset=utf-8") }, t("saveKm")) : null,
+        h("button", { "data-testid": "rs-save-method", onclick: () => download(methodText(r.record, s.recipe, locale), "research-stats-method.txt", "text/plain;charset=utf-8") }, t("saveMethod")),
         h("button", { "data-testid": "rs-save-record", onclick: () => download(`${JSON.stringify(r.record, null, 2)}\n`, "research-stats-record.json", "application/json") }, t("saveRecord")),
       ),
     );

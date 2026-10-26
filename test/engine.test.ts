@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { runRecipe } from "../src/core/engine";
 import { DATASET_CHECK } from "../src/core/recipes";
 import { methodText } from "../src/core/methodText";
@@ -15,8 +15,8 @@ const params = { patientColumn: "Patient", clinicalIdColumn: "Patient", timeColu
 const opts = { seed: 42, pluginVersion: "0.1.0", now: () => "2026-10-26T00:00:00Z" };
 
 describe("runRecipe", () => {
-  it("runs the join, skips the delta step and records everything needed to reproduce", () => {
-    const { record, state } = runRecipe(DATASET_CHECK, inputs(), params, opts);
+  it("runs the join, skips the delta step and records everything needed to reproduce", async () => {
+    const { record, state } = await runRecipe(DATASET_CHECK, inputs(), params, opts);
     expect(record.status).toBe("ok");
     expect(record.steps.map((s) => `${s.id}:${s.status}`)).toEqual(["delta:skipped", "join:ok"]);
     expect(record.steps[1].summary).toMatchObject({ joined: 2, featureOnly: 0, clinicalOnly: 1, survivalUsable: 2, features: 1 });
@@ -29,26 +29,26 @@ describe("runRecipe", () => {
     expect(record.changedFromDefault.sort()).toEqual(["clinicalIdColumn", "eventColumn", "patientColumn", "timeColumn"]);
     expect(state.dataset).toBeTruthy();
   });
-  it("gives the same record for the same inputs, settings and seed, and records a changed seed", () => {
-    const a = runRecipe(DATASET_CHECK, inputs(), params, opts).record;
-    const b = runRecipe(DATASET_CHECK, inputs(), params, opts).record;
+  it("gives the same record for the same inputs, settings and seed, and records a changed seed", async () => {
+    const a = (await runRecipe(DATASET_CHECK, inputs(), params, opts)).record;
+    const b = (await runRecipe(DATASET_CHECK, inputs(), params, opts)).record;
     expect(b).toEqual(a);
-    expect(runRecipe(DATASET_CHECK, inputs(), params, { ...opts, seed: 43 }).record.seed).toBe(43);
+    expect((await runRecipe(DATASET_CHECK, inputs(), params, { ...opts, seed: 43 })).record.seed).toBe(43);
   });
-  it("stops at the failed step, keeps its errors and does not run the later steps (negative)", () => {
-    const { record } = runRecipe(DATASET_CHECK, inputs(), { ...params, eventColumn: "missingcol" }, opts);
+  it("stops at the failed step, keeps its errors and does not run the later steps (negative)", async () => {
+    const { record } = await runRecipe(DATASET_CHECK, inputs(), { ...params, eventColumn: "missingcol" }, opts);
     expect(record.status).toBe("failed");
     const join = record.steps.find((s) => s.id === "join")!;
     expect(join.status).toBe("failed");
     expect(join.errors.join()).toMatch(/列「missingcol」がありません/);
   });
-  it("refuses a setting the recipe does not have (negative)", () => {
-    expect(() => runRecipe(DATASET_CHECK, inputs(), { nope: 1 }, opts)).toThrow(/無い設定/);
+  it("refuses a setting the recipe does not have (negative)", async () => {
+    await expect(runRecipe(DATASET_CHECK, inputs(), { nope: 1 }, opts)).rejects.toThrow(/無い設定/);
   });
-  it("runs the delta step when two time points are given and feeds the join with it", () => {
+  it("runs the delta step when two time points are given and feeds the join with it", async () => {
     const base = sourceOf("base.csv", "CaseLabel,Patient,f1\nL1,P1,10\nL2,P2,20\n");
     const fol = sourceOf("fol.csv", "CaseLabel,Patient,f1\nL1,P1,15\nL2,P2,10\n");
-    const { record, state } = runRecipe(DATASET_CHECK, { ...inputs(), baseline: [base], followup: [fol] }, { ...params, featureIdColumn: "CaseLabel" }, opts);
+    const { record, state } = await runRecipe(DATASET_CHECK, { ...inputs(), baseline: [base], followup: [fol] }, { ...params, featureIdColumn: "CaseLabel" }, opts);
     expect(record.status).toBe("ok");
     expect(record.steps.map((s) => s.status)).toEqual(["ok", "ok"]);
     const ds = state.dataset as { featureNames: string[]; features: number[][] };
@@ -58,8 +58,9 @@ describe("runRecipe", () => {
 });
 
 describe("methodText", () => {
-  const run = runRecipe(DATASET_CHECK, inputs(), params, opts);
-  it("writes the version, seed, counts and changed settings in both languages", () => {
+  let run: Awaited<ReturnType<typeof runRecipe>>;
+  beforeAll(async () => { run = await runRecipe(DATASET_CHECK, inputs(), params, opts); });
+  it("writes the version, seed, counts and changed settings in both languages", async () => {
     const ja = methodText(run.record, DATASET_CHECK, "ja");
     expect(ja).toContain("research-stats 0.1.0");
     expect(ja).toContain("乱数シード: 42");
@@ -73,11 +74,11 @@ describe("methodText", () => {
     expect(en).toContain("2 patients were analysed");
     expect(en).toContain("not available");
   });
-  it("is the same text for the same record", () => {
+  it("is the same text for the same record", async () => {
     expect(methodText(run.record, DATASET_CHECK, "ja")).toBe(methodText(structuredClone(run.record), DATASET_CHECK, "ja"));
   });
-  it("says the settings were the defaults when nothing was changed", () => {
-    const r = runRecipe(DATASET_CHECK, { features: [sourceOf("f.csv", "CaseLabel,f1\nA,1\n")], clinical: sourceOf("c.csv", "CaseLabel\nA\n") }, {}, opts);
+  it("says the settings were the defaults when nothing was changed", async () => {
+    const r = await runRecipe(DATASET_CHECK, { features: [sourceOf("f.csv", "CaseLabel,f1\nA,1\n")], clinical: sourceOf("c.csv", "CaseLabel\nA\n") }, {}, opts);
     expect(methodText(r.record, DATASET_CHECK, "ja")).toContain("設定は既定値のままであった");
   });
 });

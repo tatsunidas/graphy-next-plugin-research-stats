@@ -32,12 +32,17 @@ export interface StepContext {
   rng: Rng;
   /** 手順どうしで受け渡す結果（データセットなど）。 */
   state: Record<string, unknown>;
+  /**
+   * 長い計算の途中で呼ぶ。進み具合を知らせ、画面に制御を返し、取り消されていれば例外を投げる。
+   * 呼ぶ頻度は気にしなくてよい（制御を返すのは一定時間ごと）。
+   */
+  tick(label: string, fraction: number): Promise<void>;
 }
 
 export interface Step {
   id: string;
   title: LocalText;
-  run(ctx: StepContext): StepOutcome;
+  run(ctx: StepContext): StepOutcome | Promise<StepOutcome>;
 }
 
 export interface Recipe {
