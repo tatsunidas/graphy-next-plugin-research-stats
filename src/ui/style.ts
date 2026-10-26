@@ -1,7 +1,7 @@
 /** ウィンドウの中だけに効く CSS（接頭辞 rs-）。ライト・ダーク両方で読めるよう、色は変数で持つ。 */
 export const CSS = `
 .rs-root{--bg:#fff;--fg:#1f2d3d;--muted:#5a6672;--line:#d7dee6;--accent:#0b5cad;--warn:#8a5300;--warn-bg:#fff6e5;--err:#b00020;--err-bg:#fdecee;
-  font:13px/1.55 system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;color:var(--fg);background:var(--bg);padding:12px 16px;box-sizing:border-box;min-height:100%}
+  font:13px/1.55 system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;color:var(--fg);background:var(--bg);padding:12px 16px;box-sizing:border-box;height:100%;overflow:auto}
 @media (prefers-color-scheme:dark){.rs-root{--bg:#16191d;--fg:#e3e8ec;--muted:#9aa6b0;--line:#2c353d;--accent:#7fb2d6;--warn:#e6c065;--warn-bg:#3a3018;--err:#ff8a98;--err-bg:#3d1c22}}
 .rs-root h2{font-size:14px;margin:18px 0 6px;color:var(--accent)}
 .rs-banner{background:var(--warn-bg);color:var(--warn);border:1px solid var(--line);border-radius:6px;padding:5px 9px;font-size:12px}
