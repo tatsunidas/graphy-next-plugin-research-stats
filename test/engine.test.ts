@@ -82,3 +82,12 @@ describe("methodText", () => {
     expect(methodText(r.record, DATASET_CHECK, "ja")).toContain("設定は既定値のままであった");
   });
 });
+
+describe("recipes that need a clinical table", () => {
+  it("stop with a reason, not an exception, when there is none", async () => {
+    const { record } = await runRecipe(DATASET_CHECK, { features: [sourceOf("f.csv", "CaseLabel,f1\nA,1\n")] }, {}, opts);
+    expect(record.status).toBe("failed");
+    expect(record.steps.at(-1)!.errors.join()).toMatch(/臨床の表がありません/);
+    expect(record.inputs.length).toBe(1);
+  });
+});

@@ -52,7 +52,7 @@ export async function runRecipe(
   if (unknown.length) throw new Error(`レシピ ${recipe.id} に無い設定です: ${unknown.join(", ")}`);
   const changed = Object.keys(merged).filter((k) => !same(merged[k], recipe.defaults[k]));
 
-  const all = [...inputs.features, inputs.clinical, ...(inputs.baseline ?? []), ...(inputs.followup ?? [])];
+  const all = [...inputs.features, ...(inputs.clinical ? [inputs.clinical] : []), ...(inputs.baseline ?? []), ...(inputs.followup ?? [])];
   const record: RunRecord = {
     recipeId: recipe.id,
     pluginVersion: opts.pluginVersion,

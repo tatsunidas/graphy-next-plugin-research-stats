@@ -11,7 +11,8 @@ export type ParamValue = string | number | boolean | null | string[];
 
 export interface RunInputs {
   features: TableSource[];
-  clinical: TableSource;
+  /** 臨床の表。結合を使わないレシピ（再現性）では無くてよい。 */
+  clinical?: TableSource;
   /** 変化率を使うとき: 前の時点・後の時点の特徴量の表。 */
   baseline?: TableSource[];
   followup?: TableSource[];

@@ -14,6 +14,10 @@ import {
   type BinaryCohort, type ComboResult, type DiscrimContext, type FeatureRow as DiscrimRow, type R2Params, type TreeResult,
 } from "./r2";
 import { treeNodes } from "./discrim/tree";
+import {
+  analyzeReliability, buildConditions, exclusionCandidates, R3_DEFAULTS, readR3Params,
+  type ConditionData, type R3Params, type ReliabilityRow,
+} from "./r3";
 
 const str = (v: ParamValue, name: string): string | null => {
   if (v === null || v === "") return null;
@@ -68,6 +72,7 @@ export const DATASET_CHECK: Recipe = {
       run(ctx): StepOutcome {
         const p = ctx.params;
         const delta = ctx.state.delta as DeltaResult | undefined;
+        if (!ctx.inputs.clinical) return { summary: {}, warnings: [], errors: ["臨床の表がありません（このレシピには臨床の CSV が要ります）"] };
         const idCol = str(p.featureIdColumn, "featureIdColumn")!;
         // 変化率があるときは、患者ごとの変化率の表を特徴量として結合する（1 行 = 1 患者）
         const features = delta
@@ -292,4 +297,56 @@ export const R2_DISCRIMINATION: Recipe = {
   ],
 };
 
-export const RECIPES: Recipe[] = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION];
+export interface R3State {
+  params: R3Params;
+  data: ConditionData;
+  rows: ReliabilityRow[];
+  candidates: ReliabilityRow[];
+}
+
+export const R3_REPRODUCIBILITY: Recipe = {
+  id: "r3-reproducibility",
+  title: { ja: "条件を変えても同じか（R3 再現性）", en: "Reproducibility across conditions (R3)" },
+  question: {
+    ja: "この特徴量は、ソフト・設定・再構成などの条件を変えても同じ値になるか。",
+    en: "Does this feature give the same value when the software, settings or reconstruction change?",
+  },
+  sources: ["Fornacon-Wood I et al. Eur Radiol 2020 (PMID 32483644)"],
+  defaults: { ...R3_DEFAULTS },
+  steps: [
+    {
+      id: "conditions",
+      title: { ja: "条件の突き合わせ", en: "Match the conditions" },
+      run(ctx): StepOutcome {
+        const pr = readR3Params(ctx.params);
+        if ("error" in pr) return { summary: {}, warnings: [], errors: [pr.error] };
+        const r = buildConditions(ctx.inputs.features, pr.idColumn);
+        if (!r.ok) return { summary: {}, warnings: [], errors: r.errors };
+        ctx.state.r3 = { params: pr, data: r.data, rows: [], candidates: [] } satisfies R3State;
+        const rep = r.data.report;
+        const warnings: string[] = [];
+        if (rep.unmatched.length) warnings.push(`全条件に揃っていない行が ${rep.unmatched.length} 個あります（解析に使いません。一覧は結果にあります）`);
+        if (rep.excludedColumns.length) warnings.push(`使えなかった列が ${rep.excludedColumns.length} 個あります（理由は結果にあります）`);
+        return { summary: { conditions: rep.conditions.length, matched: rep.matched, unmatched: rep.unmatched.length, features: r.data.features.length, excludedColumns: rep.excludedColumns.length }, warnings };
+      },
+    },
+    {
+      id: "icc",
+      title: { ja: "ICC と区分", en: "ICC and categories" },
+      async run(ctx): Promise<StepOutcome> {
+        const st = ctx.state.r3 as R3State;
+        await ctx.tick("ICC", 0);
+        st.rows = analyzeReliability(st.data);
+        st.candidates = exclusionCandidates(st.rows, st.params.minCategory);
+        const by = (c: string) => st.rows.filter((r) => r.result?.category === c).length;
+        const failed = st.rows.filter((r) => r.error !== null).length;
+        return {
+          summary: { features: st.rows.length, poor: by("poor"), moderate: by("moderate"), good: by("good"), excellent: by("excellent"), failed, minCategory: st.params.minCategory, candidates: st.candidates.length },
+          warnings: failed ? [`${failed} 個の特徴量は ICC を計算できませんでした（理由は結果の表にあります。ICC は空欄のままで、0 や 1 にはしていません）`] : [],
+        };
+      },
+    },
+  ],
+};
+
+export const RECIPES: Recipe[] = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY];
