@@ -1,0 +1,51 @@
+/**
+ * レシピの宣言。レシピ = 調べたい問い + 固定した手順 + 既定値 + 出典。利用者は手法でなく問いを選ぶ。
+ * 手順（Step）は実行エンジン（engine.ts）が順に呼び、設定・結果の要約・警告・エラーを記録する。
+ */
+import type { TableSource } from "./dataset";
+import type { Rng } from "./rng";
+
+export type Locale = "ja" | "en";
+export type LocalText = Record<Locale, string>;
+export type ParamValue = string | number | boolean | null | string[];
+
+export interface RunInputs {
+  features: TableSource[];
+  clinical: TableSource;
+  /** 変化率を使うとき: 前の時点・後の時点の特徴量の表。 */
+  baseline?: TableSource[];
+  followup?: TableSource[];
+}
+
+export interface StepOutcome {
+  summary: Record<string, string | number | boolean | null>;
+  warnings: string[];
+  /** 1 つでもあれば、その手順は失敗として記録され、以降は実行しない。 */
+  errors?: string[];
+  /** 何もしなかったとき（条件が合わない）に true。 */
+  skipped?: boolean;
+}
+
+export interface StepContext {
+  inputs: RunInputs;
+  params: Record<string, ParamValue>;
+  rng: Rng;
+  /** 手順どうしで受け渡す結果（データセットなど）。 */
+  state: Record<string, unknown>;
+}
+
+export interface Step {
+  id: string;
+  title: LocalText;
+  run(ctx: StepContext): StepOutcome;
+}
+
+export interface Recipe {
+  id: string;
+  title: LocalText;
+  question: LocalText;
+  /** 出典（論文など）。空なら「出典なし」と表示する（この段の基盤レシピは統計の手法を持たない）。 */
+  sources: string[];
+  defaults: Record<string, ParamValue>;
+  steps: Step[];
+}
