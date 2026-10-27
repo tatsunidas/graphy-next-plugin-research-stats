@@ -88,7 +88,7 @@ export function p4Panel(st: P4State, t: T): HTMLElement {
     fm.model && fm.choice.lambda !== null ? h("div", { "data-testid": "rs-p4-final-lambda" }, `λ = ${fm.choice.lambda.toPrecision(3)}`) : null,
     fm.model?.resolved ? h("div", { "data-testid": "rs-p4-final-params" }, `${t("thParams")}: ${hyperText(fm.model.resolved)}`) : null,
     fm.model?.importance ? importanceChart(fm.model.importance.map((v, a) => ({ n: st.names[fm.model!.cols[a]], v })), t) : null,
-    h("div", { class: "rs-note" }, t("p4FinalNote"))) : null;
+    h("div", { class: "rs-note", "data-testid": "rs-p4-final-note" }, t(st.params.ml ? "p4FinalNoteMl" : st.params.model === "lasso" ? "p4FinalNoteLasso" : "p4FinalNote"))) : null;
 
   const testView = te ? h("div", { "data-testid": "rs-p4-test" },
     h("h3", {}, t("p4TestTitle")),
