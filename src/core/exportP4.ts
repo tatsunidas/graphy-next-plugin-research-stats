@@ -1,6 +1,6 @@
 /** P4（パイプライン）の結果を CSV にする。評価できなかった値は空欄（0 や 0.5 にしない）。 */
 import { toCsv } from "./csv";
-import type { P4State } from "./recipes";
+import type { P4State } from "./skills";
 
 /** 外側の分割ごとの結果。 */
 export function p4FoldsCsv(st: P4State): string {

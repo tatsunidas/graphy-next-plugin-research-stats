@@ -3,7 +3,7 @@ import type { Performance } from "../core/discrim/roc";
 import { rocPoints } from "../core/discrim/roc";
 import type { FeatureRow } from "../core/r2";
 import { meetsCriterion } from "../core/r2";
-import type { R2State } from "../core/recipes";
+import type { R2State } from "../core/skills";
 import { h } from "./dom";
 import type { Key } from "./i18n";
 import { fmtP } from "./r1View";

@@ -3,7 +3,7 @@
  * 記録に無いこと（出典・手法の根拠）は書かない。
  */
 import type { RunRecord } from "./engine";
-import type { Locale, ParamValue, Recipe } from "./recipe";
+import type { Locale, ParamValue, Skill } from "./skill";
 
 const short = (h: string | null, locale: Locale) => (h === null ? (locale === "ja" ? "未取得" : "not available") : h.slice(0, 12));
 const show = (v: ParamValue) => (Array.isArray(v) ? `[${v.join(", ")}]` : v === null ? "null" : String(v));
@@ -125,7 +125,7 @@ function p4Lines(record: RunRecord, locale: Locale): string[] {
   return L;
 }
 
-export function methodText(record: RunRecord, recipe: Recipe, locale: Locale): string {
+export function methodText(record: RunRecord, skill: Skill, locale: Locale): string {
   const join = record.steps.find((s) => s.id === "join");
   const delta = record.steps.find((s) => s.id === "delta" && s.status === "ok");
   const n = (k: string) => join?.summary[k] ?? "?";
@@ -133,7 +133,7 @@ export function methodText(record: RunRecord, recipe: Recipe, locale: Locale): s
   const changed = record.changedFromDefault.map((k) => `${k}=${show(record.params[k])}`);
   const lines: string[] = [];
   if (locale === "ja") {
-    lines.push(`レシピ「${recipe.title.ja}」（${recipe.id}）を、GRAPHY-Next プラグイン research-stats ${record.pluginVersion} で実行した。`);
+    lines.push(`スキル「${skill.title.ja}」（${skill.id}）を、GRAPHY-Next プラグイン research-stats ${record.pluginVersion} で実行した。`);
     lines.push(`入力ファイル: ${files}。`);
     if (delta) lines.push(`2 時点の特徴量から変化率を求めた（順序: ${show(record.params.deltaOrder)}、病変の不一致 ${delta.summary.unmatchedLesions} 個、変化率を作れなかった値 ${delta.summary.impossible} 個）。`);
     if (join) {
@@ -145,7 +145,7 @@ export function methodText(record: RunRecord, recipe: Recipe, locale: Locale): s
     lines.push(`乱数シード: ${record.seed}。${changed.length ? `既定値から変更した設定: ${changed.join("、")}。` : "設定は既定値のままであった。"}`);
     lines.push("研究用であり、診断・治療の判断に用いない。");
   } else {
-    lines.push(`The recipe "${recipe.title.en}" (${recipe.id}) was run with the GRAPHY-Next plugin research-stats ${record.pluginVersion}.`);
+    lines.push(`The skill "${skill.title.en}" (${skill.id}) was run with the GRAPHY-Next plugin research-stats ${record.pluginVersion}.`);
     lines.push(`Input files: ${files}.`);
     if (delta) lines.push(`Percent change was computed from the two time points (order: ${show(record.params.deltaOrder)}; unmatched lesions ${delta.summary.unmatchedLesions}; values that could not be computed ${delta.summary.impossible}).`);
     if (join) {

@@ -1,6 +1,6 @@
 import { rocPoints } from "../core/discrim/roc";
 import { calibrationBins } from "../core/discrim/calibration";
-import type { P4State } from "../core/recipes";
+import type { P4State } from "../core/skills";
 import { h } from "./dom";
 import type { Key } from "./i18n";
 import { xyChart, type XySeries } from "./xyChart";

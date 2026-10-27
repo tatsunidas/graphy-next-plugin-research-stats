@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runRecipe } from "../src/core/engine";
-import { R3_REPRODUCIBILITY, type R3State } from "../src/core/recipes";
+import { runSkill } from "../src/core/engine";
+import { R3_REPRODUCIBILITY, type R3State } from "../src/core/skills";
 import { sourceOf } from "../src/core/delta";
 import { Rng } from "../src/core/rng";
 import { methodText } from "../src/core/methodText";
@@ -23,9 +23,9 @@ function synth(n = 40, seed = 1) {
 }
 const opts = (seed = 1) => ({ seed, pluginVersion: "0.4.0", now: () => "2026-10-27T00:00:00Z" });
 
-describe("R3 reproducibility recipe", () => {
+describe("R3 reproducibility skill", () => {
   it("grades the planted features and runs without a clinical table", async () => {
-    const { record, state } = await runRecipe(R3_REPRODUCIBILITY, synth(), { minCategory: "good" }, opts());
+    const { record, state } = await runSkill(R3_REPRODUCIBILITY, synth(), { minCategory: "good" }, opts());
     expect(record.status).toBe("ok");
     const st = state.r3 as R3State;
     const by = (f: string) => st.rows.find((r) => r.feature === f)!;
@@ -43,7 +43,7 @@ describe("R3 reproducibility recipe", () => {
     expect(record.inputs.length).toBe(3);
   });
   it("lists the columns it could not use, with the reason (no silent dropping)", async () => {
-    const { state } = await runRecipe(R3_REPRODUCIBILITY, synth(), {}, opts());
+    const { state } = await runSkill(R3_REPRODUCIBILITY, synth(), {}, opts());
     const ex = (state.r3 as R3State).data.report.excludedColumns;
     expect(ex.find((e) => e.name === "f_text")!.reason).toMatch(/数でない値/);
     expect(ex.find((e) => e.name === "Roi_Voxels")).toBeUndefined(); // 数値の列なので共通の列として使われる（除外は利用者が決める）
@@ -51,7 +51,7 @@ describe("R3 reproducibility recipe", () => {
   it("lists rows missing in some condition and does not use them", async () => {
     const s = synth(30, 2);
     s.features[1] = sourceOf("condB.csv", s.features[1].table.rows.slice(2).reduce((acc, r) => `${acc}${r.join(",")}\n`, `${s.features[1].table.header.join(",")}\n`));
-    const { state, record } = await runRecipe(R3_REPRODUCIBILITY, s, {}, opts());
+    const { state, record } = await runSkill(R3_REPRODUCIBILITY, s, {}, opts());
     const rep = (state.r3 as R3State).data.report;
     expect(rep.matched).toBe(28);
     expect(rep.unmatched.map((u) => u.id).sort()).toEqual(["L0", "L1"]);
@@ -59,28 +59,28 @@ describe("R3 reproducibility recipe", () => {
     expect(record.steps[0].warnings.join()).toMatch(/揃っていない行が 2 個/);
   });
   it("stops with a reason: one condition, duplicate IDs, a missing ID column (negative)", async () => {
-    const one = await runRecipe(R3_REPRODUCIBILITY, { features: [synth().features[0]] }, {}, opts());
+    const one = await runSkill(R3_REPRODUCIBILITY, { features: [synth().features[0]] }, {}, opts());
     expect(one.record.steps[0].errors.join()).toMatch(/2 つ以上/);
     const d = synth();
     const dup = { features: [d.features[0], sourceOf("dup.csv", `${d.features[1].table.header.join(",")}\n${d.features[1].table.rows.concat([d.features[1].table.rows[0]]).map((r) => r.join(",")).join("\n")}\n`)] };
-    expect((await runRecipe(R3_REPRODUCIBILITY, dup, {}, opts())).record.steps[0].errors.join()).toMatch(/重複/);
-    expect((await runRecipe(R3_REPRODUCIBILITY, synth(), { reliabilityIdColumn: "nope" }, opts())).record.steps[0].errors.join()).toMatch(/列「nope」がありません/);
-    expect((await runRecipe(R3_REPRODUCIBILITY, synth(), { minCategory: "great" }, opts())).record.steps[0].errors.join()).toMatch(/除外の基準/);
+    expect((await runSkill(R3_REPRODUCIBILITY, dup, {}, opts())).record.steps[0].errors.join()).toMatch(/重複/);
+    expect((await runSkill(R3_REPRODUCIBILITY, synth(), { reliabilityIdColumn: "nope" }, opts())).record.steps[0].errors.join()).toMatch(/列「nope」がありません/);
+    expect((await runSkill(R3_REPRODUCIBILITY, synth(), { minCategory: "great" }, opts())).record.steps[0].errors.join()).toMatch(/除外の基準/);
   });
   it("does not make a candidate list unless a criterion is chosen", async () => {
-    const { state } = await runRecipe(R3_REPRODUCIBILITY, synth(), {}, opts());
+    const { state } = await runSkill(R3_REPRODUCIBILITY, synth(), {}, opts());
     expect((state.r3 as R3State).candidates).toEqual([]);
   });
   it("is reproducible and gives the same ICC when the conditions are listed in another order", async () => {
-    const a = await runRecipe(R3_REPRODUCIBILITY, synth(), {}, opts()), b = await runRecipe(R3_REPRODUCIBILITY, synth(), {}, opts());
+    const a = await runSkill(R3_REPRODUCIBILITY, synth(), {}, opts()), b = await runSkill(R3_REPRODUCIBILITY, synth(), {}, opts());
     expect(b.record).toEqual(a.record);
     const s = synth();
-    const rev = await runRecipe(R3_REPRODUCIBILITY, { features: [...s.features].reverse() }, {}, opts());
+    const rev = await runSkill(R3_REPRODUCIBILITY, { features: [...s.features].reverse() }, {}, opts());
     const x = (a.state.r3 as R3State).rows[0].result!.single.icc, y = (rev.state.r3 as R3State).rows[0].result!.single.icc;
     expect(Math.abs(x - y)).toBeLessThan(1e-12);
   });
   it("Bland–Altman for a chosen pair, with exports and the method text", async () => {
-    const { record, state } = await runRecipe(R3_REPRODUCIBILITY, synth(), { minCategory: "moderate" }, opts());
+    const { record, state } = await runSkill(R3_REPRODUCIBILITY, synth(), { minCategory: "moderate" }, opts());
     const st = state.r3 as R3State;
     const ba = blandAltmanFor(st.data, "f_shift", 0, 2);
     if ("error" in ba) throw new Error(ba.error);

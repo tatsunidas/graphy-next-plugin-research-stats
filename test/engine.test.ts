@@ -1,9 +1,9 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { runRecipe } from "../src/core/engine";
-import { DATASET_CHECK } from "../src/core/recipes";
+import { runSkill } from "../src/core/engine";
+import { DATASET_CHECK } from "../src/core/skills";
 import { methodText } from "../src/core/methodText";
 import { sourceOf } from "../src/core/delta";
-import type { RunInputs } from "../src/core/recipe";
+import type { RunInputs } from "../src/core/skill";
 
 const FEAT = "CaseLabel,Patient,f1\nL1,P1,1\nL2,P1,3\nL3,P2,5\n";
 const CLIN = "Patient,time,event\nP1,12,1\nP2,8,0\nP9,4,1\n";
@@ -14,9 +14,9 @@ const inputs = (): RunInputs => ({
 const params = { patientColumn: "Patient", clinicalIdColumn: "Patient", timeColumn: "time", eventColumn: "event" };
 const opts = { seed: 42, pluginVersion: "0.1.0", now: () => "2026-10-26T00:00:00Z" };
 
-describe("runRecipe", () => {
+describe("runSkill", () => {
   it("runs the join, skips the delta step and records everything needed to reproduce", async () => {
-    const { record, state } = await runRecipe(DATASET_CHECK, inputs(), params, opts);
+    const { record, state } = await runSkill(DATASET_CHECK, inputs(), params, opts);
     expect(record.status).toBe("ok");
     expect(record.steps.map((s) => `${s.id}:${s.status}`)).toEqual(["delta:skipped", "join:ok"]);
     expect(record.steps[1].summary).toMatchObject({ joined: 2, featureOnly: 0, clinicalOnly: 1, survivalUsable: 2, features: 1 });
@@ -30,25 +30,25 @@ describe("runRecipe", () => {
     expect(state.dataset).toBeTruthy();
   });
   it("gives the same record for the same inputs, settings and seed, and records a changed seed", async () => {
-    const a = (await runRecipe(DATASET_CHECK, inputs(), params, opts)).record;
-    const b = (await runRecipe(DATASET_CHECK, inputs(), params, opts)).record;
+    const a = (await runSkill(DATASET_CHECK, inputs(), params, opts)).record;
+    const b = (await runSkill(DATASET_CHECK, inputs(), params, opts)).record;
     expect(b).toEqual(a);
-    expect((await runRecipe(DATASET_CHECK, inputs(), params, { ...opts, seed: 43 })).record.seed).toBe(43);
+    expect((await runSkill(DATASET_CHECK, inputs(), params, { ...opts, seed: 43 })).record.seed).toBe(43);
   });
   it("stops at the failed step, keeps its errors and does not run the later steps (negative)", async () => {
-    const { record } = await runRecipe(DATASET_CHECK, inputs(), { ...params, eventColumn: "missingcol" }, opts);
+    const { record } = await runSkill(DATASET_CHECK, inputs(), { ...params, eventColumn: "missingcol" }, opts);
     expect(record.status).toBe("failed");
     const join = record.steps.find((s) => s.id === "join")!;
     expect(join.status).toBe("failed");
     expect(join.errors.join()).toMatch(/列「missingcol」がありません/);
   });
-  it("refuses a setting the recipe does not have (negative)", async () => {
-    await expect(runRecipe(DATASET_CHECK, inputs(), { nope: 1 }, opts)).rejects.toThrow(/無い設定/);
+  it("refuses a setting the skill does not have (negative)", async () => {
+    await expect(runSkill(DATASET_CHECK, inputs(), { nope: 1 }, opts)).rejects.toThrow(/無い設定/);
   });
   it("runs the delta step when two time points are given and feeds the join with it", async () => {
     const base = sourceOf("base.csv", "CaseLabel,Patient,f1\nL1,P1,10\nL2,P2,20\n");
     const fol = sourceOf("fol.csv", "CaseLabel,Patient,f1\nL1,P1,15\nL2,P2,10\n");
-    const { record, state } = await runRecipe(DATASET_CHECK, { ...inputs(), baseline: [base], followup: [fol] }, { ...params, featureIdColumn: "CaseLabel" }, opts);
+    const { record, state } = await runSkill(DATASET_CHECK, { ...inputs(), baseline: [base], followup: [fol] }, { ...params, featureIdColumn: "CaseLabel" }, opts);
     expect(record.status).toBe("ok");
     expect(record.steps.map((s) => s.status)).toEqual(["ok", "ok"]);
     const ds = state.dataset as { featureNames: string[]; features: number[][] };
@@ -58,8 +58,8 @@ describe("runRecipe", () => {
 });
 
 describe("methodText", () => {
-  let run: Awaited<ReturnType<typeof runRecipe>>;
-  beforeAll(async () => { run = await runRecipe(DATASET_CHECK, inputs(), params, opts); });
+  let run: Awaited<ReturnType<typeof runSkill>>;
+  beforeAll(async () => { run = await runSkill(DATASET_CHECK, inputs(), params, opts); });
   it("writes the version, seed, counts and changed settings in both languages", async () => {
     const ja = methodText(run.record, DATASET_CHECK, "ja");
     expect(ja).toContain("research-stats 0.1.0");
@@ -78,14 +78,14 @@ describe("methodText", () => {
     expect(methodText(run.record, DATASET_CHECK, "ja")).toBe(methodText(structuredClone(run.record), DATASET_CHECK, "ja"));
   });
   it("says the settings were the defaults when nothing was changed", async () => {
-    const r = await runRecipe(DATASET_CHECK, { features: [sourceOf("f.csv", "CaseLabel,f1\nA,1\n")], clinical: sourceOf("c.csv", "CaseLabel\nA\n") }, {}, opts);
+    const r = await runSkill(DATASET_CHECK, { features: [sourceOf("f.csv", "CaseLabel,f1\nA,1\n")], clinical: sourceOf("c.csv", "CaseLabel\nA\n") }, {}, opts);
     expect(methodText(r.record, DATASET_CHECK, "ja")).toContain("設定は既定値のままであった");
   });
 });
 
-describe("recipes that need a clinical table", () => {
+describe("skills that need a clinical table", () => {
   it("stop with a reason, not an exception, when there is none", async () => {
-    const { record } = await runRecipe(DATASET_CHECK, { features: [sourceOf("f.csv", "CaseLabel,f1\nA,1\n")] }, {}, opts);
+    const { record } = await runSkill(DATASET_CHECK, { features: [sourceOf("f.csv", "CaseLabel,f1\nA,1\n")] }, {}, opts);
     expect(record.status).toBe("failed");
     expect(record.steps.at(-1)!.errors.join()).toMatch(/臨床の表がありません/);
     expect(record.inputs.length).toBe(1);

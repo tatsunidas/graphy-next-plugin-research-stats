@@ -1,10 +1,10 @@
 /**
- * レシピ R1「予後」の計算本体。特徴量ごとに群分け → Kaplan–Meier / log-rank / Cox → 多重比較の補正 →
+ * スキル R1「予後」の計算本体。特徴量ごとに群分け → Kaplan–Meier / log-rank / Cox → 多重比較の補正 →
  * 有意な特徴量と臨床因子の多変量 Cox → 臨床モデルへの追加効果（−2LL の差）と補正 C-index。
- * 画面にも recipes.ts にも依存しない（試験しやすいよう純粋に保つ）。
+ * 画面にも skills.ts にも依存しない（試験しやすいよう純粋に保つ）。
  */
 import type { Dataset } from "./dataset";
-import type { ParamValue } from "./recipe";
+import type { ParamValue } from "./skill";
 import type { Rng } from "./rng";
 import { chi2Sf } from "./survival/dist";
 import { bootstrapCorrectedC, cIndex, type CorrectedC, type FitFn } from "./survival/cindex";

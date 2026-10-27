@@ -1,10 +1,10 @@
 /**
- * 組み込みのレシピ。この段（基盤）は「データセットの確認」だけで、統計の手法は持たない。
+ * 組み込みのスキル。この段（基盤）は「データセットの確認」だけで、統計の手法は持たない。
  * 結合・集約・変化率の結果を確かめ、結合済みのデータセットを書き出すために使う。
  */
 import { buildDataset, type Dataset, type JoinReport } from "./dataset";
 import { buildDelta, deltaToTable, type DeltaOrder, type DeltaResult } from "./delta";
-import type { ParamValue, Recipe, StepOutcome } from "./recipe";
+import type { ParamValue, Skill, StepOutcome } from "./skill";
 import {
   analyzeFeature, applyMultiplicity, covariatesOf, isSelected, multivariate, R1_DEFAULTS, readR1Params, survivalCohort,
   type CovariateData, type FeatureContext, type FeatureResult, type MultivariateResult, type R1Params, type SurvivalCohort,
@@ -30,7 +30,7 @@ const str = (v: ParamValue, name: string): string | null => {
   return v;
 };
 
-export const DATASET_CHECK: Recipe = {
+export const DATASET_CHECK: Skill = {
   id: "dataset-check",
   title: { ja: "データセットの確認", en: "Dataset check" },
   question: {
@@ -77,7 +77,7 @@ export const DATASET_CHECK: Recipe = {
       run(ctx): StepOutcome {
         const p = ctx.params;
         const delta = ctx.state.delta as DeltaResult | undefined;
-        if (!ctx.inputs.clinical) return { summary: {}, warnings: [], errors: ["臨床の表がありません（このレシピには臨床の CSV が要ります）"] };
+        if (!ctx.inputs.clinical) return { summary: {}, warnings: [], errors: ["臨床の表がありません（このスキルには臨床の CSV が要ります）"] };
         const idCol = str(p.featureIdColumn, "featureIdColumn")!;
         // 変化率があるときは、患者ごとの変化率の表を特徴量として結合する（1 行 = 1 患者）
         const features = delta
@@ -119,7 +119,7 @@ export interface R1State {
   model: MultivariateResult | null;
 }
 
-export const R1_PROGNOSIS: Recipe = {
+export const R1_PROGNOSIS: Skill = {
   id: "r1-prognosis",
   title: { ja: "予後との関係（R1）", en: "Association with survival (R1)" },
   question: {
@@ -217,7 +217,7 @@ export interface R2State {
   treeNote: string | null;
 }
 
-export const R2_DISCRIMINATION: Recipe = {
+export const R2_DISCRIMINATION: Skill = {
   id: "r2-discrimination",
   title: { ja: "2 群の判別（R2）", en: "Discrimination of two groups (R2)" },
   question: {
@@ -309,7 +309,7 @@ export interface R3State {
   candidates: ReliabilityRow[];
 }
 
-export const R3_REPRODUCIBILITY: Recipe = {
+export const R3_REPRODUCIBILITY: Skill = {
   id: "r3-reproducibility",
   title: { ja: "条件を変えても同じか（R3 再現性）", en: "Reproducibility across conditions (R3)" },
   question: {
@@ -370,7 +370,7 @@ export interface P4State {
 
 const fmt = (v: number | null) => (v === null ? null : Number(v.toFixed(6)));
 
-export const P4_PIPELINE: Recipe = {
+export const P4_PIPELINE: Skill = {
   id: "p4-pipeline",
   title: { ja: "予測モデルの性能（入れ子の交差検証とテスト集合）", en: "Prediction model performance (nested cross-validation and test set)" },
   question: {
@@ -500,4 +500,4 @@ export const P4_PIPELINE: Recipe = {
   ],
 };
 
-export const RECIPES: Recipe[] = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE];
+export const SKILLS: Skill[] = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE];

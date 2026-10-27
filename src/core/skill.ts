@@ -1,5 +1,5 @@
 /**
- * レシピの宣言。レシピ = 調べたい問い + 固定した手順 + 既定値 + 出典。利用者は手法でなく問いを選ぶ。
+ * スキルの宣言。スキル = 調べたい問い + 固定した手順 + 既定値 + 出典。利用者は手法でなく問いを選ぶ。
  * 手順（Step）は実行エンジン（engine.ts）が順に呼び、設定・結果の要約・警告・エラーを記録する。
  */
 import type { TableSource } from "./dataset";
@@ -11,12 +11,12 @@ export type ParamValue = string | number | boolean | null | string[];
 
 export interface RunInputs {
   features: TableSource[];
-  /** 臨床の表。結合を使わないレシピ（再現性）では無くてよい。 */
+  /** 臨床の表。結合を使わないスキル（再現性）では無くてよい。 */
   clinical?: TableSource;
   /** 変化率を使うとき: 前の時点・後の時点の特徴量の表。 */
   baseline?: TableSource[];
   followup?: TableSource[];
-  /** 品質管理で除く特徴量の一覧（再現性のレシピの除外候補 CSV など。「feature」列）。 */
+  /** 品質管理で除く特徴量の一覧（再現性のスキルの除外候補 CSV など。「feature」列）。 */
   exclusion?: TableSource;
   /** テスト集合の固定ファイル（JSON の文字列）。 */
   lock?: { name: string; text: string };
@@ -53,11 +53,11 @@ export interface Step {
   run(ctx: StepContext): StepOutcome | Promise<StepOutcome>;
 }
 
-export interface Recipe {
+export interface Skill {
   id: string;
   title: LocalText;
   question: LocalText;
-  /** 出典（論文など）。空なら「出典なし」と表示する（この段の基盤レシピは統計の手法を持たない）。 */
+  /** 出典（論文など）。空なら「出典なし」と表示する（この段の基盤スキルは統計の手法を持たない）。 */
   sources: string[];
   defaults: Record<string, ParamValue>;
   steps: Step[];
