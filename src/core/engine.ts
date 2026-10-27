@@ -1,9 +1,9 @@
 /**
- * レシピの実行エンジン。手順を順に実行し、再現に要る情報（版・シード・入力の SHA-256・設定・
+ * スキルの実行エンジン。手順を順に実行し、再現に要る情報（版・シード・入力の SHA-256・設定・
  * 既定値からの変更・手順ごとの要約と警告）を RunRecord に残す。同じ入力・設定・シードなら記録も同じ。
  */
 import { Rng } from "./rng";
-import type { ParamValue, Recipe, RunInputs, StepOutcome } from "./recipe";
+import type { ParamValue, Skill, RunInputs, StepOutcome } from "./skill";
 
 export interface RecordedInput {
   name: string;
@@ -20,7 +20,7 @@ export interface RecordedStep {
 }
 
 export interface RunRecord {
-  recipeId: string;
+  skillId: string;
   pluginVersion: string;
   startedAt: string;
   seed: number;
@@ -44,17 +44,17 @@ export const CANCELLED = "取り消されました";
 
 const same = (a: ParamValue, b: ParamValue) => JSON.stringify(a) === JSON.stringify(b);
 
-export async function runRecipe(
-  recipe: Recipe, inputs: RunInputs, params: Record<string, ParamValue>, opts: RunOptions,
+export async function runSkill(
+  skill: Skill, inputs: RunInputs, params: Record<string, ParamValue>, opts: RunOptions,
 ): Promise<{ record: RunRecord; state: Record<string, unknown> }> {
-  const merged: Record<string, ParamValue> = { ...recipe.defaults, ...params };
-  const unknown = Object.keys(params).filter((k) => !(k in recipe.defaults));
-  if (unknown.length) throw new Error(`レシピ ${recipe.id} に無い設定です: ${unknown.join(", ")}`);
-  const changed = Object.keys(merged).filter((k) => !same(merged[k], recipe.defaults[k]));
+  const merged: Record<string, ParamValue> = { ...skill.defaults, ...params };
+  const unknown = Object.keys(params).filter((k) => !(k in skill.defaults));
+  if (unknown.length) throw new Error(`スキル ${skill.id} に無い設定です: ${unknown.join(", ")}`);
+  const changed = Object.keys(merged).filter((k) => !same(merged[k], skill.defaults[k]));
 
   const all = [...inputs.features, ...(inputs.clinical ? [inputs.clinical] : []), ...(inputs.baseline ?? []), ...(inputs.followup ?? []), ...(inputs.exclusion ? [inputs.exclusion] : [])];
   const record: RunRecord = {
-    recipeId: recipe.id,
+    skillId: skill.id,
     pluginVersion: opts.pluginVersion,
     startedAt: opts.now(),
     seed: opts.seed,
@@ -67,7 +67,7 @@ export async function runRecipe(
   const state: Record<string, unknown> = {};
   const rng = new Rng(opts.seed);
   let lastYield = Date.now();
-  for (const step of recipe.steps) {
+  for (const step of skill.steps) {
     let out: StepOutcome;
     const tick = async (label: string, fraction: number) => {
       if (opts.isCancelled?.()) throw new Error(CANCELLED);

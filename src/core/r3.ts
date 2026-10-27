@@ -1,11 +1,11 @@
 /**
- * レシピ R3「再現性」の計算本体。条件ごとの特徴量の表（1 ファイル = 1 条件）を行 ID で突き合わせ、
+ * スキル R3「再現性」の計算本体。条件ごとの特徴量の表（1 ファイル = 1 条件）を行 ID で突き合わせ、
  * 特徴量ごとに ICC（absolute agreement）と区分を求める。結合・生存・結果ラベルは使わない。
  * 欠損は 0 にせず、その特徴量では欠損のある行を除く（除いた数を出す）。
  */
 import { parseCell } from "./csv";
 import type { TableSource } from "./dataset";
-import type { ParamValue } from "./recipe";
+import type { ParamValue } from "./skill";
 import { blandAltman, type BlandAltman } from "./reliability/blandAltman";
 import { icc, type IccCategory, type IccResult } from "./reliability/icc";
 

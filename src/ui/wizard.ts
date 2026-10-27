@@ -2,11 +2,11 @@ import { CsvError, parseCsv } from "../core/csv";
 import { sha256Hex } from "../core/digest";
 import { datasetCsv } from "../core/exportDataset";
 import { defaultFeatureColumns, type Dataset, type JoinReport, type TableSource } from "../core/dataset";
-import { runRecipe, type RunRecord } from "../core/engine";
+import { runSkill, type RunRecord } from "../core/engine";
 import { kmPointsCsv, r1ResultsCsv } from "../core/exportR1";
 import { methodText } from "../core/methodText";
-import type { Locale, ParamValue, Recipe } from "../core/recipe";
-import { DATASET_CHECK, P4_PIPELINE, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, type P4State, type R1State, type R2State, type R3State } from "../core/recipes";
+import type { Locale, ParamValue, Skill } from "../core/skill";
+import { DATASET_CHECK, P4_PIPELINE, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, type P4State, type R1State, type R2State, type R3State } from "../core/skills";
 import { P4_DEFAULTS } from "../core/p4";
 import { p4FoldsCsv, p4PredictionsCsv, p4QcCsv, p4SelectionCsv } from "../core/exportP4";
 import { p4Panel } from "./p4View";
@@ -39,7 +39,7 @@ interface State {
   params: Record<string, ParamValue>;
   seed: number;
   noSha: boolean;
-  recipe: Recipe;
+  skill: Skill;
   progress: { label: string; fraction: number } | null;
   cancelled: boolean;
   selectedFeature: string | null;
@@ -56,13 +56,13 @@ async function readSource(file: File): Promise<TableSource> {
 /** 研究統計のウィンドウの中身を組み立てる。 */
 export function mountWizard(root: HTMLElement, locale: Locale): void {
   const t = makeT(locale);
-  const s: State = { features: [], clinical: null, baseline: [], followup: [], exclusion: null, lock: null, errors: [], params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS, ...R3_DEFAULTS, ...P4_DEFAULTS }, seed: 1, noSha: false, recipe: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, ba: { feature: null, a: 0, b: 1 }, result: null };
+  const s: State = { features: [], clinical: null, baseline: [], followup: [], exclusion: null, lock: null, errors: [], params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS, ...R3_DEFAULTS, ...P4_DEFAULTS }, seed: 1, noSha: false, skill: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, ba: { feature: null, a: 0, b: 1 }, result: null };
   root.replaceChildren();
   const wrap = h("div", { class: "rs-root", "data-testid": "rs-root" });
   root.append(h("style", {}, CSS), wrap);
 
   const render = () => {
-    const isR3 = s.recipe.id === R3_REPRODUCIBILITY.id, isP4 = s.recipe.id === P4_PIPELINE.id;
+    const isR3 = s.skill.id === R3_REPRODUCIBILITY.id, isP4 = s.skill.id === P4_PIPELINE.id;
     const canRun = isR3 ? s.features.length >= 2 : !!(s.features.length && s.clinical);
     const items: (Node | null)[] = [
       h("div", { class: "rs-banner", "data-testid": "rs-banner" }, t("banner")),
@@ -83,13 +83,13 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       s.noSha ? h("div", { class: "rs-note" }, t("sha")) : null,
       h("h2", {}, t("step2")),
       isR3 ? r3Mapping() : mapping(),
-      recipeControls(),
+      skillControls(),
       h("div", { class: "rs-row" },
         h("label", {}, t("seed")),
         h("input", { type: "number", min: 0, step: 1, value: s.seed, "data-testid": "rs-seed", onchange: (e: Event) => { s.seed = Math.max(0, Math.floor(Number((e.target as HTMLInputElement).value) || 0)); } }),
       ),
       h("div", { class: "rs-row" },
-        h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: !canRun || s.progress !== null, onclick: () => run(false) }, s.recipe.id === DATASET_CHECK.id ? t("run") : t("runR1")),
+        h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: !canRun || s.progress !== null, onclick: () => run(false) }, s.skill.id === DATASET_CHECK.id ? t("run") : t("runR1")),
         s.progress !== null ? h("button", { "data-testid": "rs-cancel", onclick: () => { s.cancelled = true; } }, t("cancel")) : null,
         !canRun ? h("span", { class: "rs-note" }, t("pickFirst")) : null,
       ),
@@ -305,17 +305,17 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     return out.filter((x): x is HTMLElement => x !== null);
   }
 
-  function recipeControls(): HTMLElement {
+  function skillControls(): HTMLElement {
     const p = s.params;
-    const pick = (id: string) => { s.recipe = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE].find((r) => r.id === id) ?? DATASET_CHECK; s.result = null; s.selectedFeature = null; render(); };
-    const sel = h("select", { "data-testid": "rs-recipe", onchange: (e: Event) => pick((e.target as HTMLSelectElement).value) },
-      h("option", { value: DATASET_CHECK.id }, t("recipeCheck")), h("option", { value: R1_PROGNOSIS.id }, t("recipeR1")), h("option", { value: R2_DISCRIMINATION.id }, t("recipeR2")), h("option", { value: R3_REPRODUCIBILITY.id }, t("recipeR3")), h("option", { value: P4_PIPELINE.id }, t("recipeP4")));
-    sel.value = s.recipe.id;
-    const out: Node[] = [h("div", { class: "rs-row" }, h("label", {}, t("recipe")), sel)];
-    if (s.recipe.id === R3_REPRODUCIBILITY.id) return h("div", {}, ...out, ...r3Controls());
-    if (s.recipe.id === P4_PIPELINE.id) return h("div", {}, ...out, ...p4Controls());
-    if (s.recipe.id === R2_DISCRIMINATION.id) return h("div", {}, ...out, ...r2Controls());
-    if (s.recipe.id !== R1_PROGNOSIS.id) return h("div", {}, ...out);
+    const pick = (id: string) => { s.skill = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE].find((r) => r.id === id) ?? DATASET_CHECK; s.result = null; s.selectedFeature = null; render(); };
+    const sel = h("select", { "data-testid": "rs-skill", onchange: (e: Event) => pick((e.target as HTMLSelectElement).value) },
+      h("option", { value: DATASET_CHECK.id }, t("skillCheck")), h("option", { value: R1_PROGNOSIS.id }, t("skillR1")), h("option", { value: R2_DISCRIMINATION.id }, t("skillR2")), h("option", { value: R3_REPRODUCIBILITY.id }, t("skillR3")), h("option", { value: P4_PIPELINE.id }, t("skillP4")));
+    sel.value = s.skill.id;
+    const out: Node[] = [h("div", { class: "rs-row" }, h("label", {}, t("skill")), sel)];
+    if (s.skill.id === R3_REPRODUCIBILITY.id) return h("div", {}, ...out, ...r3Controls());
+    if (s.skill.id === P4_PIPELINE.id) return h("div", {}, ...out, ...p4Controls());
+    if (s.skill.id === R2_DISCRIMINATION.id) return h("div", {}, ...out, ...r2Controls());
+    if (s.skill.id !== R1_PROGNOSIS.id) return h("div", {}, ...out);
     const choice = (testId: string, label: string, key: string, options: [string, string][]) => {
       const el = h("select", { "data-testid": testId, onchange: (e: Event) => { s.params = { ...s.params, [key]: (e.target as HTMLSelectElement).value }; s.result = null; render(); } },
         ...options.map(([v, l]) => h("option", { value: v }, l)));
@@ -341,20 +341,20 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
   }
 
   async function run(evaluate = false) {
-    const needsClinical = s.recipe.id !== R3_REPRODUCIBILITY.id;
-    const isP4 = s.recipe.id === P4_PIPELINE.id;
+    const needsClinical = s.skill.id !== R3_REPRODUCIBILITY.id;
+    const isP4 = s.skill.id === P4_PIPELINE.id;
     if ((needsClinical && !s.clinical) || !s.features.length || s.progress !== null) return;
-    const recipe = s.recipe;
+    const skill = s.skill;
     const params: Record<string, ParamValue> = { ...s.params };
-    for (const k of Object.keys(params)) if (!(k in recipe.defaults)) delete params[k];
+    for (const k of Object.keys(params)) if (!(k in skill.defaults)) delete params[k];
     if (isP4) params.evaluateTest = evaluate;
     s.cancelled = false;
     s.progress = { label: "", fraction: 0 };
     s.result = null;
     render();
     try {
-      const { record, state } = await runRecipe(
-        recipe,
+      const { record, state } = await runSkill(
+        skill,
         {
           features: s.features, clinical: needsClinical ? (s.clinical ?? undefined) : undefined, baseline: s.baseline, followup: s.followup,
           exclusion: isP4 ? (s.exclusion ?? undefined) : undefined, lock: isP4 && s.params.lockMode === "use" ? (s.lock ?? undefined) : undefined,
@@ -402,7 +402,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     const list = (title: string, xs: string[], testId: string) =>
       xs.length ? h("details", { "data-testid": testId }, h("summary", {}, `${title}（${xs.length}）`), h("ul", {}, ...xs.map((x) => h("li", {}, x)))) : null;
     return h("div", { "data-testid": "rs-result" },
-      r.record.recipeId === R3_REPRODUCIBILITY.id ? null : h("h2", {}, t("step3")),
+      r.record.skillId === R3_REPRODUCIBILITY.id ? null : h("h2", {}, t("step3")),
       failed.length ? h("div", { class: "rs-err", "data-testid": "rs-errors" }, h("b", {}, t("errors")), h("ul", {}, ...failed.map((e) => h("li", {}, e)))) : null,
       warns.length ? h("div", { class: "rs-warn", "data-testid": "rs-warnings" }, h("b", {}, t("warnings")), h("ul", {}, ...warns.map((e) => h("li", {}, e)))) : null,
       rep ? h("div", {},
@@ -428,7 +428,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       r.r1 && r.r1.rows.length ? r1Panel(r.r1, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
       h("h2", {}, t("step4")),
       h("div", { class: "rs-row" },
-        r.record.recipeId === R3_REPRODUCIBILITY.id ? null : h("button", { "data-testid": "rs-save-data", disabled: !r.dataset, onclick: () => r.dataset && download(datasetCsv(r.dataset, (s.params.clinicalIdColumn as string) ?? "ID"), "research-stats-dataset.csv", "text/csv;charset=utf-8") }, t("saveData")),
+        r.record.skillId === R3_REPRODUCIBILITY.id ? null : h("button", { "data-testid": "rs-save-data", disabled: !r.dataset, onclick: () => r.dataset && download(datasetCsv(r.dataset, (s.params.clinicalIdColumn as string) ?? "ID"), "research-stats-dataset.csv", "text/csv;charset=utf-8") }, t("saveData")),
         r.r1 && r.r1.rows.length ? h("button", { "data-testid": "rs-save-results", onclick: () => download(r1ResultsCsv(r.r1!.rows), "research-stats-r1-results.csv", "text/csv;charset=utf-8") }, t("saveResults")) : null,
         r.r1 && r.r1.rows.length ? h("button", { "data-testid": "rs-save-km", onclick: () => download(kmPointsCsv(r.r1!.context, r.r1!.rows), "research-stats-km-points.csv", "text/csv;charset=utf-8") }, t("saveKm")) : null,
         r.r3 && r.r3.rows.length ? h("button", { "data-testid": "rs-save-r3-results", onclick: () => download(r3ResultsCsv(r.r3!.rows), "research-stats-r3-icc.csv", "text/csv;charset=utf-8") }, t("saveR3Results")) : null,
@@ -447,7 +447,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         r.r2 && r.r2.rows.length ? h("button", { "data-testid": "rs-save-r2-results", onclick: () => download(r2ResultsCsv(r.r2!.rows), "research-stats-r2-results.csv", "text/csv;charset=utf-8") }, t("saveR2Results")) : null,
         r.r2?.combo && r.r2.combo.rocLoo.length ? h("button", { "data-testid": "rs-save-curves", onclick: () => download(r2CurvesCsv(r.r2!.combo!), "research-stats-r2-curves.csv", "text/csv;charset=utf-8") }, t("saveCurves")) : null,
         r.r2?.tree ? h("button", { "data-testid": "rs-save-tree", onclick: () => download(treeCsv(r.r2!.tree!.root, r.r2!.context.names), "research-stats-r2-tree.csv", "text/csv;charset=utf-8") }, t("saveTree")) : null,
-        h("button", { "data-testid": "rs-save-method", onclick: () => download(methodText(r.record, s.recipe, locale), "research-stats-method.txt", "text/plain;charset=utf-8") }, t("saveMethod")),
+        h("button", { "data-testid": "rs-save-method", onclick: () => download(methodText(r.record, s.skill, locale), "research-stats-method.txt", "text/plain;charset=utf-8") }, t("saveMethod")),
         h("button", { "data-testid": "rs-save-record", onclick: () => download(`${JSON.stringify(r.record, null, 2)}\n`, "research-stats-record.json", "application/json") }, t("saveRecord")),
       ),
     );

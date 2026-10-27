@@ -1,10 +1,10 @@
 /**
- * レシピ R2「判別」の計算本体。結果ラベル（2 値）に対して、特徴量ごとに ROC・AUC・しきい値と感度・特異度、
+ * スキル R2「判別」の計算本体。結果ラベル（2 値）に対して、特徴量ごとに ROC・AUC・しきい値と感度・特異度、
  * 基準を満たした上位 k 個のロジスティック回帰での組み合わせ（LOO で検証）、較正・決定曲線、決定木を作る。
- * 画面・recipes.ts に依存しない。
+ * 画面・skills.ts に依存しない。
  */
 import type { Dataset } from "./dataset";
-import type { ParamValue } from "./recipe";
+import type { ParamValue } from "./skill";
 import type { Rng } from "./rng";
 import { calibrationBins, calibrationSlope, type CalibrationBin } from "./discrim/calibration";
 import { decisionCurve, defaultThresholds, type DcaPoint } from "./discrim/dca";

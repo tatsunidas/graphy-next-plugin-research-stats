@@ -1,6 +1,6 @@
 import { kmForFeature } from "../core/r1";
 import type { FeatureResult } from "../core/r1";
-import type { R1State } from "../core/recipes";
+import type { R1State } from "../core/skills";
 import { h } from "./dom";
 import type { Key } from "./i18n";
 import { kmChart } from "./kmChart";
