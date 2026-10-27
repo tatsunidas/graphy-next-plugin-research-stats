@@ -27,11 +27,13 @@ export function p4Panel(st: P4State, t: T): HTMLElement {
 
   let cvView: HTMLElement | null = null;
   if (cv) {
+    const lasso = st.params.model === "lasso";
     const table = h("table", { class: "rs-table", "data-testid": "rs-p4-folds" },
-      h("thead", {}, h("tr", {}, ...[t("thRepeat"), t("thFold"), t("thTrain"), t("thTestN"), "k", metric, t("thFeatures"), t("thReason")].map((x) => h("th", {}, x)))),
+      h("thead", {}, h("tr", {}, ...[t("thRepeat"), t("thFold"), t("thTrain"), t("thTestN"), "k", ...(lasso ? ["λ"] : []), metric, t("thFeatures"), t("thReason")].map((x) => h("th", {}, x)))),
       h("tbody", {}, ...cv.folds.map((f) => h("tr", { "data-testid": "rs-p4-fold" },
         h("td", {}, String(f.repeat + 1)), h("td", {}, String(f.fold + 1)), h("td", {}, String(f.nTrain)), h("td", {}, String(f.nTest)),
-        h("td", {}, f.k === null ? "—" : String(f.k)), h("td", { "data-testid": "rs-p4-fold-score" }, f3(f.score)),
+        h("td", {}, f.k === null ? "—" : String(f.k)), lasso ? h("td", { "data-testid": "rs-p4-fold-lambda" }, f.lambda === null ? "—" : f.lambda.toPrecision(3)) : null,
+        h("td", { "data-testid": "rs-p4-fold-score" }, f3(f.score)),
         h("td", {}, f.cols.map((j) => st.names[j]).join(" + ")), h("td", {}, f.error ?? "")))));
     const pts = cv.folds.map((f, q) => (f.score === null ? null : [q + 1, f.score])).filter((x): x is number[] => x !== null);
     const dev = st.qc!.dev;
@@ -66,7 +68,8 @@ export function p4Panel(st: P4State, t: T): HTMLElement {
 
   const finalView = fm ? h("div", { "data-testid": "rs-p4-final" },
     h("h3", {}, t("p4FinalTitle")),
-    fm.model ? h("div", {}, t("p4Final", { k: fm.model.cols.length, features: fm.model.cols.map((j) => st.names[j]).join(" + ") })) : h("div", { class: "rs-err" }, fm.error ?? ""),
+    fm.model ? h("div", {}, t("p4Final", { k: fm.model.cols.length, features: fm.model.cols.map((j) => st.names[j]).join(" + ") || "—" })) : h("div", { class: "rs-err" }, fm.error ?? ""),
+    fm.model && fm.choice.lambda !== null ? h("div", { "data-testid": "rs-p4-final-lambda" }, `λ = ${fm.choice.lambda.toPrecision(3)}`) : null,
     h("div", { class: "rs-note" }, t("p4FinalNote"))) : null;
 
   const testView = te ? h("div", { "data-testid": "rs-p4-test" },

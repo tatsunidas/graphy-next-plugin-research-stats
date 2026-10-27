@@ -5,6 +5,7 @@
 import type { RunRecord } from "./engine";
 import type { Locale, ParamValue, Skill } from "./skill";
 
+const lam = (v: unknown) => (typeof v === "number" ? v.toPrecision(3) : "?");
 const short = (h: string | null, locale: Locale) => (h === null ? (locale === "ja" ? "未取得" : "not available") : h.slice(0, 12));
 const show = (v: ParamValue) => (Array.isArray(v) ? `[${v.join(", ")}]` : v === null ? "null" : String(v));
 
@@ -92,6 +93,7 @@ function p4Lines(record: RunRecord, locale: Locale): string[] {
   const p = record.params, bin = p.outcomeKind === "binary";
   const num = (v: unknown) => (typeof v === "number" ? (Number.isInteger(v) ? String(v) : v.toFixed(3)) : "?");
   const strat = bin || p.stratifySurvival === true;
+  const lasso = p.model === "lasso";
   const sha = (v: unknown) => (typeof v === "string" ? v.slice(0, 12) : "?");
   const qcParts = (ja: boolean) => [
     p.dropConstant ? (ja ? "値が 1 種類しかない特徴量の除外" : "removal of features with a single value") : null,
@@ -106,9 +108,13 @@ function p4Lines(record: RunRecord, locale: Locale): string[] {
     const qp = qcParts(true);
     L.push(`${qp.length ? `開発集合の値だけを使って、${qp.join("、")}を行い（除いた特徴量 ${qc.summary.removed} 個）、` : ""}${qc.summary.featuresKept} 個の特徴量を用いた（開発集合の症例数 / 特徴量の数 = ${num(qc.summary.ratio)}）。`);
     if (Number(qc.summary.missingCells) > 0) L.push(p.missing === "impute" ? "欠損は、各訓練分割の中央値で補った（検証・テストの症例には訓練分割の中央値を当てた）。0 では補っていない。" : `欠損のある開発集合の症例 ${qc.summary.droppedDev} 人を除いた（完全症例）。`);
-    L.push(`性能は、外側 ${p.outerK} 分割（${strat ? "層化" : "層化しない"}）× ${p.repeats} 回、内側 ${p.innerK} 分割（層化しない）の入れ子の交差検証で見積もった。各訓練分割の中だけで、特徴量の順位付け（${bin ? "Mann–Whitney 検定の p" : "単変量 Cox モデルの Wald 検定の p"} の小さい順）、標準化、${bin ? "ロジスティック回帰（罰則なし）" : "Cox 比例ハザードモデル（Efron の近似）"}の当てはめを行い、使う特徴量の数を候補 {${String(p.kCandidates)}} から内側の交差検証（${bin ? "予測を束ねた AUC" : "分割ごとの C-index の平均"} が最大、同じなら少ない方）で選んだ。`);
+    L.push(lasso
+      ? `性能は、外側 ${p.outerK} 分割（${strat ? "層化" : "層化しない"}）× ${p.repeats} 回の入れ子の交差検証で見積もった。各訓練分割の中だけで、欠損の補完・標準化と、${bin ? "L1 罰則つきロジスティック回帰（LASSO、切片は罰則なし）" : "L1 罰則つき Cox 比例ハザードモデル（LASSO-Cox、同時刻は Breslow）"}の当てはめを行い、λ は ${p.lassoNLambda} 点の列（その訓練分割で求めた）から内側 ${p.innerK} 分割（層化しない）の交差検証の偏差で${p.lassoRule === "1se" ? " 1SE 規則により" : "最小のものを"}選んだ。`
+      : `性能は、外側 ${p.outerK} 分割（${strat ? "層化" : "層化しない"}）× ${p.repeats} 回、内側 ${p.innerK} 分割（層化しない）の入れ子の交差検証で見積もった。各訓練分割の中だけで、特徴量の順位付け（${bin ? "Mann–Whitney 検定の p" : "単変量 Cox モデルの Wald 検定の p"} の小さい順）、標準化、${bin ? "ロジスティック回帰（罰則なし）" : "Cox 比例ハザードモデル（Efron の近似）"}の当てはめを行い、使う特徴量の数を候補 {${String(p.kCandidates)}} から内側の交差検証（${bin ? "予測を束ねた AUC" : "分割ごとの C-index の平均"} が最大、同じなら少ない方）で選んだ。`);
     L.push(`外側の分割ごとの${bin ? " AUC" : " Harrell の C-index"} は平均 ${num(cv.summary.mean)}（最小 ${num(cv.summary.min)}・最大 ${num(cv.summary.max)}、評価できた分割 ${cv.summary.valid}/${cv.summary.total}）${bin && cv.summary.pooledMean !== null ? `、予測を束ねた AUC は ${num(cv.summary.pooledMean)}（反復の平均）` : ""}であった。交差検証の推定値には信頼区間は付けない（分割の間の相関のため、素朴な区間は狭すぎる）。`);
-    if (fin && fin.summary.features) L.push(`最終モデルは、開発集合全体での交差検証で特徴量の数を選び（${fin.summary.k} 個）、開発集合全体で作り直した（${fin.summary.features}）。入れ子の交差検証の値は、この手順全体の性能の見積もりである。`);
+    if (fin && fin.summary.k !== null && fin.summary.k !== undefined) L.push(lasso
+      ? `最終モデルは、開発集合全体での交差検証で λ を選び（λ = ${lam(fin.summary.lambda)}、係数が 0 でない特徴量 ${fin.summary.k} 個）、開発集合全体で解いた（${fin.summary.features || "特徴量なし"}）。入れ子の交差検証の値は、この手順全体の性能の見積もりである。`
+      : `最終モデルは、開発集合全体での交差検証で特徴量の数を選び（${fin.summary.k} 個）、開発集合全体で作り直した（${fin.summary.features}）。入れ子の交差検証の値は、この手順全体の性能の見積もりである。`);
     if (te) L.push(`テスト集合（${te.summary.n} 人）で最終モデルを評価し、${bin ? `AUC ${num(te.summary.value)}（DeLong 法の 95% 信頼区間 ${num(te.summary.lower)}–${num(te.summary.upper)}）` : `C-index ${num(te.summary.value)}（ブートストラップ ${p.testBootstrapB} 回のパーセンタイル 95% 信頼区間 ${num(te.summary.lower)}–${num(te.summary.upper)}）`}を得た。このテスト集合での評価は ${te.summary.evaluation} 回目である。`);
   } else {
     L.push(bin ? `"${p.positiveLabel}" was the positive outcome; ${co.summary.patients} patients (${co.summary.positivesOrEvents} positive) were included.` : `${co.summary.patients} patients with time and event (${co.summary.positivesOrEvents} events) were included.`);
@@ -117,9 +123,13 @@ function p4Lines(record: RunRecord, locale: Locale): string[] {
     const qp = qcParts(false);
     L.push(`${qp.length ? `Using the development set only, quality control comprised ${qp.join("; ")} (${qc.summary.removed} features removed); ` : ""}${qc.summary.featuresKept} features were used (development cases / features = ${num(qc.summary.ratio)}).`);
     if (Number(qc.summary.missingCells) > 0) L.push(p.missing === "impute" ? "Missing values were imputed with the median of each training split (applied to the held-out cases as well); they were not filled with 0." : `${qc.summary.droppedDev} development cases with missing values were excluded (complete cases).`);
-    L.push(`Performance was estimated by nested cross-validation with ${p.outerK} outer folds (${strat ? "stratified" : "not stratified"}) x ${p.repeats} repeat(s) and ${p.innerK} inner folds (not stratified). Within each training split only, features were ranked (${bin ? "Mann-Whitney p value" : "Wald p value of univariable Cox models"}), standardised and ${bin ? "combined by logistic regression (no penalty)" : "combined in a Cox proportional hazards model (Efron's approximation)"}; the number of features was chosen from {${String(p.kCandidates)}} by the inner cross-validation (${bin ? "highest pooled AUC" : "highest mean C-index across folds"}, ties to the smaller number).`);
+    L.push(lasso
+      ? `Performance was estimated by nested cross-validation with ${p.outerK} outer folds (${strat ? "stratified" : "not stratified"}) x ${p.repeats} repeat(s). Within each training split only, missing values were imputed, features standardised and ${bin ? "an L1-penalised logistic regression (LASSO; intercept not penalised)" : "an L1-penalised Cox model (LASSO-Cox; Breslow ties)"} fitted; lambda was chosen from ${p.lassoNLambda} values (computed on that training split) by the deviance in ${p.innerK}-fold inner cross-validation (not stratified) using ${p.lassoRule === "1se" ? "the 1-SE rule" : "the minimum"}.`
+      : `Performance was estimated by nested cross-validation with ${p.outerK} outer folds (${strat ? "stratified" : "not stratified"}) x ${p.repeats} repeat(s) and ${p.innerK} inner folds (not stratified). Within each training split only, features were ranked (${bin ? "Mann-Whitney p value" : "Wald p value of univariable Cox models"}), standardised and ${bin ? "combined by logistic regression (no penalty)" : "combined in a Cox proportional hazards model (Efron's approximation)"}; the number of features was chosen from {${String(p.kCandidates)}} by the inner cross-validation (${bin ? "highest pooled AUC" : "highest mean C-index across folds"}, ties to the smaller number).`);
     L.push(`The outer-fold ${bin ? "AUC" : "Harrell's C-index"} was ${num(cv.summary.mean)} on average (min ${num(cv.summary.min)}, max ${num(cv.summary.max)}; ${cv.summary.valid}/${cv.summary.total} folds evaluable)${bin && cv.summary.pooledMean !== null ? `; the pooled AUC was ${num(cv.summary.pooledMean)} (mean over repeats)` : ""}. No confidence interval is given for the cross-validated estimate (naive intervals are too narrow because the folds are correlated).`);
-    if (fin && fin.summary.features) L.push(`The final model chose the number of features by cross-validation on the whole development set (${fin.summary.k}) and was refitted on it (${fin.summary.features}). The nested cross-validation estimates the performance of this whole procedure.`);
+    if (fin && fin.summary.k !== null && fin.summary.k !== undefined) L.push(lasso
+      ? `The final model chose lambda by cross-validation on the whole development set (lambda = ${lam(fin.summary.lambda)}; ${fin.summary.k} non-zero coefficients) and was fitted on it (${fin.summary.features || "no features"}). The nested cross-validation estimates the performance of this whole procedure.`
+      : `The final model chose the number of features by cross-validation on the whole development set (${fin.summary.k}) and was refitted on it (${fin.summary.features}). The nested cross-validation estimates the performance of this whole procedure.`);
     if (te) L.push(`On the test set (${te.summary.n} patients) the final model gave ${bin ? `an AUC of ${num(te.summary.value)} (DeLong 95% CI ${num(te.summary.lower)}-${num(te.summary.upper)})` : `a C-index of ${num(te.summary.value)} (bootstrap percentile 95% CI, ${p.testBootstrapB} resamples, ${num(te.summary.lower)}-${num(te.summary.upper)})`}. This was evaluation number ${te.summary.evaluation} on this test set.`);
   }
   return L;
@@ -138,7 +148,7 @@ function r5Lines(record: RunRecord, locale: Locale): string[] {
     L.push(`値が 1 種類の特徴量と、|Spearman の ρ| ≥ ${num(p.r5Corr)} の組の片方（欠損の少ない方、同じなら列の順が先の方を残す）を除いた（${sm.corrRemoved} 個）。`);
     L.push(boost
       ? `候補は、成分ごとの尤度ベースの Cox ブースティング（線形の基底、${p.r5BoostIterations} 反復、学習率 ${num(p.r5BoostNu)}、同時刻は Breslow）で係数が 0 でない特徴量とし、変数重要度（減った −対数部分尤度）の順に並べた（${sm.candidates} 個）。このブースティングが R の mboost と同じ値になるかは確かめていない。`
-      : `候補は、LASSO-Cox（同時刻は Breslow、標準化した特徴量）で係数が 0 でない特徴量とした（${sm.candidates} 個）。λ は ${p.r5LassoNLambda} 点の列から ${p.r5LassoFolds} 分割の交差検証（部分尤度の偏差）で${p.r5LassoRule === "1se" ? " 1SE 規則により" : "偏差が最小のものを"}選んだ（λ = ${num(sm.lambda)}）。`);
+      : `候補は、LASSO-Cox（同時刻は Breslow、標準化した特徴量）で係数が 0 でない特徴量とした（${sm.candidates} 個）。λ は ${p.r5LassoNLambda} 点の列から ${p.r5LassoFolds} 分割の交差検証（部分尤度の偏差）で${p.r5LassoRule === "1se" ? " 1SE 規則により" : "偏差が最小のものを"}選んだ（λ = ${lam(sm.lambda)}）。`);
     L.push(`候補から多変量 Cox モデル（Efron の近似）による後退選択（Wald の p が ${num(p.r5POut)} を超えたら除き、除いた変数は p < ${num(p.r5PIn)} なら戻す）を行い、${p.r5MaxVars} 個を超えた分は p の大きい順に除いた${Number(sm.capped) > 0 ? `（${sm.capped} 個）` : ""}。選ばれた特徴量: ${sm.selected || "なし"}。`);
     if (sm.cIndexApparent !== null) L.push(`Harrell の C-index は見かけ ${num(sm.cIndexApparent)}${sm.cIndexCorrected !== null ? `、ブートストラップ（${sm.bootstraps} 回、相関の除外から後退選択までを毎回やり直す）で楽観を補正して ${num(sm.cIndexCorrected)}（楽観 ${num(sm.optimism)}）` : ""}。`);
     if (sm.phGlobalP !== null) L.push(`比例ハザードの仮定は、スケールした Schoenfeld 残差と Grambsch–Therneau の検定（時間は 1 − Kaplan–Meier）で確かめた（全体 p = ${num(sm.phGlobalP)}）。`);
@@ -147,7 +157,7 @@ function r5Lines(record: RunRecord, locale: Locale): string[] {
     L.push(`Features with a single value, and one of each pair with |Spearman's rho| >= ${num(p.r5Corr)} (keeping the one with fewer missing values, then the earlier column), were removed (${sm.corrRemoved}).`);
     L.push(boost
       ? `Candidates were the features with non-zero coefficients in component-wise likelihood-based Cox boosting (linear base learners, ${p.r5BoostIterations} iterations, learning rate ${num(p.r5BoostNu)}, Breslow ties), ordered by variable importance (reduction in -log partial likelihood) (${sm.candidates}). Whether this boosting gives the same values as R's mboost has not been checked.`
-      : `Candidates were the features with non-zero coefficients in LASSO-Cox (Breslow ties, standardised features) (${sm.candidates}); lambda was chosen from ${p.r5LassoNLambda} values by ${p.r5LassoFolds}-fold cross-validation of the partial-likelihood deviance using ${p.r5LassoRule === "1se" ? "the 1-SE rule" : "the minimum"} (lambda = ${num(sm.lambda)}).`);
+      : `Candidates were the features with non-zero coefficients in LASSO-Cox (Breslow ties, standardised features) (${sm.candidates}); lambda was chosen from ${p.r5LassoNLambda} values by ${p.r5LassoFolds}-fold cross-validation of the partial-likelihood deviance using ${p.r5LassoRule === "1se" ? "the 1-SE rule" : "the minimum"} (lambda = ${lam(sm.lambda)}).`);
     L.push(`Backward selection with multivariable Cox models (Efron) removed variables with Wald p > ${num(p.r5POut)} and re-entered removed ones with p < ${num(p.r5PIn)}; beyond ${p.r5MaxVars} variables, those with the largest p were removed${Number(sm.capped) > 0 ? ` (${sm.capped})` : ""}. Selected features: ${sm.selected || "none"}.`);
     if (sm.cIndexApparent !== null) L.push(`Harrell's C-index was ${num(sm.cIndexApparent)} (apparent)${sm.cIndexCorrected !== null ? ` and ${num(sm.cIndexCorrected)} after bootstrap optimism correction (${sm.bootstraps} resamples, repeating everything from the correlation filter to backward selection; optimism ${num(sm.optimism)})` : ""}.`);
     if (sm.phGlobalP !== null) L.push(`Proportional hazards were checked with scaled Schoenfeld residuals and the Grambsch-Therneau test (time transformed by 1 - Kaplan-Meier; global p = ${num(sm.phGlobalP)}).`);

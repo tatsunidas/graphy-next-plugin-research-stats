@@ -7,6 +7,7 @@
  * 文献に推奨値の無い設定（分割数・反復・特徴量の数の候補・テストの割合・相関のしきい値）は既定値を置かず、
  * 利用者が入れるまで実行しない。
  */
+import type { LambdaRule } from "./model/lasso";
 import type { Dataset, TableSource } from "./dataset";
 import type { ParamValue } from "./skill";
 import { Rng } from "./rng";
@@ -35,6 +36,10 @@ export interface P4Params {
   innerK: number;
   repeats: number;
   kCandidates: number[];
+  /** 上位 k 個（罰則なし）か LASSO。 */
+  model: "topk" | "lasso";
+  lassoRule: LambdaRule | null;
+  lassoNLambda: number;
   dropConstant: boolean;
   correlationThreshold: number | null;
   missing: MissingMode | null;
@@ -53,6 +58,9 @@ export const P4_DEFAULTS: Record<string, ParamValue> = {
   innerK: null,
   repeats: null,
   kCandidates: null,
+  model: "topk",
+  lassoRule: null,
+  lassoNLambda: 100,
   dropConstant: false,
   correlationThreshold: null,
   missing: null,
@@ -82,8 +90,19 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
   };
   const outerK = int("outerK", 2, 100000, "外側の分割数"), innerK = int("innerK", 2, 100000, "内側の分割数"), repeats = int("repeats", 1, 100, "反復回数");
   for (const v of [outerK, innerK, repeats]) if (typeof v === "object") return v;
-  const ks = parseKList(p.kCandidates);
-  if ("error" in ks) return ks;
+  if (p.model !== "topk" && p.model !== "lasso") return { error: "モデルは topk か lasso です" };
+  let ks: number[] = [], lassoRule: LambdaRule | null = null, lassoNLambda = 100;
+  if (p.model === "topk") {
+    const r = parseKList(p.kCandidates);
+    if ("error" in r) return r;
+    ks = r;
+  } else {
+    if (p.lassoRule !== "min" && p.lassoRule !== "1se") return { error: "LASSO の λ の選び方（最小か 1SE）を選んでください（既定値は決めていません）" };
+    lassoRule = p.lassoRule;
+    const nl = p.lassoNLambda;
+    if (typeof nl !== "number" || !Number.isInteger(nl) || nl < 2 || nl > 1000) return { error: "λ の点の数は 2 以上 1000 以下の整数にしてください" };
+    lassoNLambda = nl;
+  }
   let testFraction: number | null = null;
   if (p.lockMode === "create") {
     if (typeof p.testFraction !== "number" || !(p.testFraction > 0 && p.testFraction < 1)) return { error: "テスト集合の割合を 0 より大きく 1 より小さい値で入れてください（既定値は決めていません）" };
@@ -99,7 +118,7 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
   if (typeof bb !== "number" || !Number.isInteger(bb) || bb < 100 || bb > 100000) return { error: "テストのブートストラップ回数は 100 以上 100000 以下の整数にしてください" };
   return {
     outcomeKind: p.outcomeKind, positiveLabel: p.outcomeKind === "binary" ? (p.positiveLabel as string) : null, lockMode: p.lockMode, testFraction,
-    stratifySurvival: p.stratifySurvival === true, outerK: outerK as number, innerK: innerK as number, repeats: repeats as number, kCandidates: ks,
+    stratifySurvival: p.stratifySurvival === true, outerK: outerK as number, innerK: innerK as number, repeats: repeats as number, kCandidates: ks, model: p.model, lassoRule, lassoNLambda,
     dropConstant: p.dropConstant === true, correlationThreshold: ct as number | null, missing: (p.missing as MissingMode | null) ?? null,
     evaluateTest: p.evaluateTest === true, calibrationBins: cb, testBootstrapB: bb,
   };
@@ -208,7 +227,10 @@ export function qcAndMissing(c: P4Cohort, dev: number[], test: number[], p: P4Pa
 
 export function specOf(c: P4Cohort, dev: number[], p: P4Params, impute: boolean): NestedCvSpec {
   const strat = p.outcomeKind === "binary" || p.stratifySurvival ? strataOf(c.task) : null;
-  return { outerK: p.outerK, innerK: p.innerK, repeats: p.repeats, kCandidates: p.kCandidates, strata: strat ? dev.map((i) => strat[i]) : null, impute };
+  return {
+    outerK: p.outerK, innerK: p.innerK, repeats: p.repeats, kCandidates: p.kCandidates, strata: strat ? dev.map((i) => strat[i]) : null, impute,
+    model: p.model === "lasso" ? { kind: "lasso", nLambda: p.lassoNLambda, rule: p.lassoRule as LambdaRule } : { kind: "topk" },
+  };
 }
 
 /** 品質管理で残した列だけの行列。 */
@@ -272,6 +294,6 @@ export async function evaluateTest(c: P4Cohort, test: number[], fm: FinalModel, 
     }
     if (bs.length) { bs.sort((a, b) => a - b); lower = percentile(bs, 0.025); upper = percentile(bs, 0.975); }
   }
-  const newLock = await addEvaluation(lock, { at: now, featuresFingerprint: featFp, summary: { metric: c.task.kind === "binary" ? "AUC" : "C-index", value, lower, upper, n: ok.length, k: fm.choice.k } });
+  const newLock = await addEvaluation(lock, { at: now, featuresFingerprint: featFp, summary: { metric: c.task.kind === "binary" ? "AUC" : "C-index", value, lower, upper, n: ok.length, k: fm.choice.k, lambda: fm.choice.lambda } });
   return { evaluation: newLock.evaluations.length, n: ok.length, excluded, value, lower, upper, roc, calibration: cal, bootstrapFailed: bf, lock: newLock };
 }

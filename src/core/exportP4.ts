@@ -5,9 +5,9 @@ import type { P4State } from "./skills";
 /** 外側の分割ごとの結果。 */
 export function p4FoldsCsv(st: P4State): string {
   const cv = st.cv;
-  if (!cv) return toCsv(["repeat", "fold", "n_train", "n_test", "k", "features", "score", "error"], []);
-  return toCsv(["repeat", "fold", "n_train", "n_test", "k", "features", "score", "error"],
-    cv.folds.map((f) => [f.repeat + 1, f.fold + 1, f.nTrain, f.nTest, f.k, f.cols.map((j) => st.names[j]).join(" + "), f.score, f.error]));
+  const head = ["repeat", "fold", "n_train", "n_test", "k", "lambda", "features", "score", "error"];
+  if (!cv) return toCsv(head, []);
+  return toCsv(head, cv.folds.map((f) => [f.repeat + 1, f.fold + 1, f.nTrain, f.nTest, f.k, f.lambda, f.cols.map((j) => st.names[j]).join(" + "), f.score, f.error]));
 }
 
 /** 開発集合の症例ごとの、交差検証での予測（反復ごとの列）。 */

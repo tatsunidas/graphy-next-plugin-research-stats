@@ -33,6 +33,8 @@ interface Lik {
   hess(Z: number[][], eta: number[], W: number[]): number[][];
   /** 飽和モデルの対数尤度（偏差の基準）。 */
   llSat: number;
+  /** 係数が 0 でない数の上限（これに達したら経路を止める）。Cox はイベント数、二値は行数 − 1。 */
+  dfLimit: number;
 }
 
 const colVal = (Z: number[][], k: number, j: number) => (j === Z[k].length ? 1 : Z[k][j]);
@@ -41,7 +43,7 @@ function likOf(task: LassoTask, rows: number[]): Lik {
   if (task.kind === "binary") {
     const y = rows.map((i) => task.y[i]);
     return {
-      n: rows.length, intercept: true, llSat: 0,
+      n: rows.length, intercept: true, llSat: 0, dfLimit: rows.length - 1,
       eval(eta) {
         let ll = 0;
         const g = new Array<number>(eta.length), h = new Array<number>(eta.length);
@@ -72,7 +74,7 @@ function likOf(task: LassoTask, rows: number[]): Lik {
   let llSat = 0;
   for (const grp of r.groups) if (grp.d > 0) llSat -= grp.d * Math.log(grp.d);
   return {
-    n: rows.length, intercept: false, llSat, eval: (eta) => breslow(s, r, eta),
+    n: rows.length, intercept: false, llSat, dfLimit: s.event.reduce((a, b) => a + b, 0), eval: (eta) => breslow(s, r, eta),
     hess(Z, eta, W) {
       // Breslow: Σ_時刻 d·(S2/S0 − S1·S1ᵀ/S0²)。リスク集合は時間の遅い方から足す
       const m = W.length;
@@ -111,6 +113,9 @@ function etaOf(Z: number[][], c: Coef): number[] {
 
 const penalty = (beta: number[]) => beta.reduce((a, b) => a + Math.abs(b), 0);
 
+/** 収束の判定: KKT 条件の違反（−(1/n)·対数尤度の勾配の尺度）。 */
+const KKT_TOL = 1e-10;
+
 /** 一つの λ での解。init から始める（経路では一つ前の λ の解）。 */
 export function solveLasso(lik: Lik, Z: number[][], lambda: number, init: Coef): { coef: Coef; iterations: number } | { error: string } {
   const n = lik.n, q = Z[0]?.length ?? 0;
@@ -124,6 +129,10 @@ export function solveLasso(lik: Lik, Z: number[][], lambda: number, init: Coef):
     for (let k = 0; k < Z.length; k++) { const gk = ev.g[k]; if (gk !== 0) for (let j = 0; j < q; j++) G[j] -= Z[k][j] * gk; }
     for (let j = 0; j < q; j++) G[j] /= n;
     const G0 = lik.intercept ? -ev.g.reduce((a, b) => a + b, 0) / n : 0;
+    // KKT 条件の違反（0 の係数は |G| ≤ λ、0 でない係数は G = −λ·符号、切片は G = 0）。十分小さければ最小
+    let kkt = Math.abs(G0);
+    for (let j = 0; j < q; j++) kkt = Math.max(kkt, cur.beta[j] !== 0 ? Math.abs(G[j] + lambda * Math.sign(cur.beta[j])) : Math.abs(G[j]) - lambda);
+    if (kkt < KKT_TOL) return { coef: cur, iterations: it };
     const tolK = 1e-12 * Math.max(1, lambda);
     const W = Array.from({ length: q }, (_, j) => j).filter((j) => cur.beta[j] !== 0 || Math.abs(G[j]) > lambda + tolK);
     if (lik.intercept) W.push(q);
@@ -134,7 +143,8 @@ export function solveLasso(lik: Lik, Z: number[][], lambda: number, init: Coef):
     // 二次の問題 gᵀd + ½dᵀHd + λΣ|c+d| を座標降下で解く（切片は罰則なし）
     const d = new Array<number>(W.length).fill(0);
     const Hd = new Array<number>(W.length).fill(0);
-    for (let sweep = 0; sweep < 100000; sweep++) {
+    // 特徴量が多くイベント（症例）が少ないと二次の問題が退化して座標降下が遅いので、回数を区切る（直線探索で下がれば足りる）
+    for (let sweep = 0; sweep < 200; sweep++) {
       let maxd = 0;
       for (let a = 0; a < W.length; a++) {
         const A = H[a][a];
@@ -148,10 +158,10 @@ export function solveLasso(lik: Lik, Z: number[][], lambda: number, init: Coef):
           maxd = Math.max(maxd, Math.abs(delta) * Math.sqrt(A));
         }
       }
-      if (maxd < 1e-15) break;
+      if (maxd < 1e-13) break;
     }
     const step = Math.max(0, ...d.map(Math.abs));
-    if (step < 1e-12) return { coef: cur, iterations: it };
+    if (step < 1e-14) return kkt < 1e-6 ? { coef: cur, iterations: it } : { error: "LASSO の更新が止まり、KKT 条件を満たしませんでした" };
     let t = 1, accepted = false;
     for (let hh = 0; hh < 60; hh++) {
       const cand: Coef = { b0: cur.b0, beta: [...cur.beta] };
@@ -165,8 +175,7 @@ export function solveLasso(lik: Lik, Z: number[][], lambda: number, init: Coef):
       }
       t /= 2;
     }
-    if (!accepted) return step < 1e-6 ? { coef: cur, iterations: it } : { error: "LASSO の目的関数が下がらず、収束しませんでした" };
-    if (t * step < 1e-11) return { coef: cur, iterations: it + 1 };
+    if (!accepted) return kkt < 1e-6 ? { coef: cur, iterations: it } : { error: "LASSO の目的関数が下がらず、収束しませんでした" };
   }
   return { error: "LASSO が 200 回で収束しませんでした" };
 }
@@ -229,7 +238,8 @@ export interface Path {
 
 /**
  * λ の大きい順に、一つ前の解から始めて解く。偏差の説明率が 0.999 を超えたら止める（glmnet と同じ止め方。
- * 二値の完全分離などで係数が発散するのを防ぐ）。
+ * 二値の完全分離などで係数が発散するのを防ぐ）。係数が 0 でない数が、Cox ではイベント数、二値では症例数 − 1 に
+ * 達したときも止める（それより多いと解が一意に決まらず、計算もほとんど進まない）。
  */
 export function lassoPath(lik: Lik, Z: number[][], lambdas: number[], b0Init: number): Path {
   const q = Z[0]?.length ?? 0;
@@ -245,6 +255,8 @@ export function lassoPath(lik: Lik, Z: number[][], lambdas: number[], b0Init: nu
     const devRatio = nullDev > 0 ? 1 - (2 * (lik.llSat - ll)) / nullDev : 0;
     points.push({ lambda: l, coef: { b0: c.b0, beta: [...c.beta] }, devRatio });
     if (devRatio > 0.999) return { points, stopped: "偏差の説明率が 0.999 を超えたため、これより小さい λ は解きません" };
+    const nz = c.beta.filter((b) => b !== 0).length;
+    if (nz >= lik.dfLimit) return { points, stopped: `係数が 0 でない特徴量が ${nz} 個（${lik.intercept ? "症例数 − 1" : "イベント数"} ${lik.dfLimit}）に達したため、これより小さい λ は解きません（解が一意に決まらない領域）` };
   }
   return { points, stopped: null };
 }

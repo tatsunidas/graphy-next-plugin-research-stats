@@ -296,7 +296,15 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       numberRow("rs-p4-outer", t("p4Outer"), "outerK", { step: 1, min: 2, emptyIsNull: true }),
       numberRow("rs-p4-inner", t("p4Inner"), "innerK", { step: 1, min: 2, emptyIsNull: true }),
       numberRow("rs-p4-repeats", t("p4Repeats"), "repeats", { step: 1, min: 1, max: 100, emptyIsNull: true }),
-      h("div", { class: "rs-row" }, h("label", {}, t("p4K")), h("input", {
+      (() => {
+        const el = h("select", { "data-testid": "rs-p4-model", onchange: (e: Event) => { s.params = { ...s.params, model: (e.target as HTMLSelectElement).value }; s.result = null; render(); } },
+          h("option", { value: "topk" }, t("mTopk")), h("option", { value: "lasso" }, t("mLasso")));
+        el.value = p.model === "lasso" ? "lasso" : "topk";
+        return h("div", { class: "rs-row" }, h("label", {}, t("p4Model")), el);
+      })(),
+      p.model === "lasso" ? choice("rs-p4-lasso-rule", t("r5LassoRule"), "lassoRule", [["min", t("ruleMin")], ["1se", t("rule1se")]]) : null,
+      p.model === "lasso" ? numberRow("rs-p4-nlambda", t("r5NLambda"), "lassoNLambda", { step: 10, min: 2 }) : null,
+      p.model === "lasso" ? null : h("div", { class: "rs-row" }, h("label", {}, t("p4K")), h("input", {
         type: "text", value: typeof p.kCandidates === "string" ? p.kCandidates : "", placeholder: "1, 2, 4", "data-testid": "rs-p4-k",
         onchange: (e: Event) => { const v = (e.target as HTMLInputElement).value.trim(); s.params = { ...s.params, kCandidates: v === "" ? null : v }; s.result = null; },
       })),
