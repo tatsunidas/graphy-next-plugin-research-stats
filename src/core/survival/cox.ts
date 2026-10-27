@@ -21,6 +21,8 @@ export interface CoxFit {
   lrChi2: number;
   lrP: number;
   iterations: number;
+  /** 係数の共分散行列（情報行列の逆）。 */
+  cov: number[][];
   /** 元の共変量 X に対する線形予測子 X·β（C-index に使う。定数のずれは順位に影響しない）。 */
   linearPredictor: number[];
 }
@@ -162,7 +164,7 @@ export function coxFit(s: Surv, X: number[][], level = 0.95): CoxResult {
       hrLower: beta.map((b, a) => Math.exp(b - zc * se[a])),
       hrUpper: beta.map((b, a) => Math.exp(b + zc * se[a])),
       z, p: z.map(normalTwoSided),
-      loglik: cur.ll, loglik0, lrChi2, lrP: chi2Sf(lrChi2, p), iterations,
+      loglik: cur.ll, loglik0, lrChi2, lrP: chi2Sf(lrChi2, p), iterations, cov,
       linearPredictor: X.map((row) => row.reduce((acc, v, a) => acc + v * beta[a], 0)),
     },
   };
