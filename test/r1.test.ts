@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runRecipe, CANCELLED } from "../src/core/engine";
-import { R1_PROGNOSIS, type R1State } from "../src/core/recipes";
+import { runSkill, CANCELLED } from "../src/core/engine";
+import { R1_PROGNOSIS, type R1State } from "../src/core/skills";
 import { sourceOf } from "../src/core/delta";
 import { Rng } from "../src/core/rng";
 import { methodText } from "../src/core/methodText";
@@ -25,9 +25,9 @@ function synth(n: number, seed: number, opts: { textCov?: boolean; noiseCols?: n
 const base = { patientColumn: null, clinicalIdColumn: "CaseLabel", timeColumn: "time", eventColumn: "event" };
 const opts = (seed = 1) => ({ seed, pluginVersion: "0.2.0", now: () => "2026-10-27T00:00:00Z" });
 
-describe("R1 prognosis recipe", () => {
+describe("R1 prognosis skill", () => {
   it("selects the planted signal and not the noise (median split, BH)", async () => {
-    const { record, state } = await runRecipe(R1_PROGNOSIS, synth(120, 11), { ...base, covariates: ["age"], bootstrapB: 50 }, opts());
+    const { record, state } = await runSkill(R1_PROGNOSIS, synth(120, 11), { ...base, covariates: ["age"], bootstrapB: 50 }, opts());
     expect(record.status).toBe("ok");
     const st = state.r1 as R1State;
     const sig = st.rows.find((r) => r.feature === "f_signal")!;
@@ -43,7 +43,7 @@ describe("R1 prognosis recipe", () => {
     expect(st.model!.addedValue!.p).toBeLessThan(0.05);
   });
   it("does not turn an unanalysable feature into a p value (missing is not 0)", async () => {
-    const { state } = await runRecipe(R1_PROGNOSIS, synth(60, 3), { ...base, bootstrapB: 0 }, opts());
+    const { state } = await runSkill(R1_PROGNOSIS, synth(60, 3), { ...base, bootstrapB: 0 }, opts());
     const st = state.r1 as R1State;
     const all = st.rows.find((r) => r.feature === "f_sparse")!;
     expect(all.error).toMatch(/解析できません/);
@@ -55,7 +55,7 @@ describe("R1 prognosis recipe", () => {
     expect(st.comparisons).toBe(st.rows.length - 1); // 比較数に解析できなかった特徴量を数えない
   });
   it("reports the same results for the same seed; the corrected p of the optimal cut-off depends on the seed", async () => {
-    const mk = (seed: number) => runRecipe(R1_PROGNOSIS, synth(70, 5, { noiseCols: 2 }), { ...base, groupMode: "optimal", permutations: 99, bootstrapB: 0 }, opts(seed));
+    const mk = (seed: number) => runSkill(R1_PROGNOSIS, synth(70, 5, { noiseCols: 2 }), { ...base, groupMode: "optimal", permutations: 99, bootstrapB: 0 }, opts(seed));
     const a = await mk(1), b = await mk(1), c = await mk(2);
     expect(b.record).toEqual(a.record);
     const pa = (a.state.r1 as R1State).rows.map((r) => r.correctedP), pc = (c.state.r1 as R1State).rows.map((r) => r.correctedP);
@@ -64,31 +64,31 @@ describe("R1 prognosis recipe", () => {
     expect(sig.rawOptimalP).toBeLessThanOrEqual(sig.correctedP!); // 素の最小 p は、補正 p より小さいか等しい
   });
   it("stops with a reason for a text covariate, for no event, and for bad settings", async () => {
-    const t = await runRecipe(R1_PROGNOSIS, synth(40, 2, { textCov: true }), { ...base, covariates: ["age"] }, opts());
+    const t = await runSkill(R1_PROGNOSIS, synth(40, 2, { textCov: true }), { ...base, covariates: ["age"] }, opts());
     expect(t.record.status).toBe("failed");
     expect(t.record.steps.at(-1)!.errors.join()).toMatch(/数でない値/);
     const s = synth(40, 2);
     const noEvent = { ...s, clinical: sourceOf("c.csv", s.clinical.table.rows.reduce((acc, r) => acc + `${r[0]},${r[1]},0,${r[3]}\n`, "CaseLabel,time,event,age\n")) };
-    const e = await runRecipe(R1_PROGNOSIS, noEvent, base, opts());
+    const e = await runSkill(R1_PROGNOSIS, noEvent, base, opts());
     expect(e.record.steps.at(-1)!.errors.join()).toMatch(/イベントが 0 件/);
-    const bad = await runRecipe(R1_PROGNOSIS, synth(40, 2), { ...base, groupMode: "value" }, opts());
+    const bad = await runSkill(R1_PROGNOSIS, synth(40, 2), { ...base, groupMode: "value" }, opts());
     expect(bad.record.steps.at(-1)!.errors.join()).toMatch(/しきい値/);
   });
   it("can be cancelled and says so", async () => {
     let calls = 0;
-    const { record } = await runRecipe(R1_PROGNOSIS, synth(60, 4), { ...base, groupMode: "optimal", permutations: 200 }, { ...opts(), isCancelled: () => ++calls > 3 });
+    const { record } = await runSkill(R1_PROGNOSIS, synth(60, 4), { ...base, groupMode: "optimal", permutations: 200 }, { ...opts(), isCancelled: () => ++calls > 3 });
     expect(record.status).toBe("failed");
     expect(record.steps.at(-1)!.errors.join()).toContain(CANCELLED);
   });
-  it("writes the method text with the recipe's settings and sources", async () => {
-    const { record } = await runRecipe(R1_PROGNOSIS, synth(60, 4), { ...base, multiplicity: "none", bootstrapB: 0 }, opts());
+  it("writes the method text with the skill's settings and sources", async () => {
+    const { record } = await runSkill(R1_PROGNOSIS, synth(60, 4), { ...base, multiplicity: "none", bootstrapB: 0 }, opts());
     const ja = methodText(record, R1_PROGNOSIS, "ja");
     expect(ja).toContain("multiplicity=none");
     expect(ja).toContain("多重比較の補正をしない");
   });
   it("timing of the heavy mode (informational)", async () => {
     const t0 = Date.now();
-    await runRecipe(R1_PROGNOSIS, synth(100, 8, { noiseCols: 20 }), { ...base, groupMode: "optimal", permutations: 1000, bootstrapB: 0 }, opts());
+    await runSkill(R1_PROGNOSIS, synth(100, 8, { noiseCols: 20 }), { ...base, groupMode: "optimal", permutations: 1000, bootstrapB: 0 }, opts());
     // eslint-disable-next-line no-console
     console.log(`optimal, 23 features, n=100, B=1000: ${Date.now() - t0} ms`);
   }, 120000);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runRecipe } from "../src/core/engine";
-import { R2_DISCRIMINATION, type R2State } from "../src/core/recipes";
+import { runSkill } from "../src/core/engine";
+import { R2_DISCRIMINATION, type R2State } from "../src/core/skills";
 import { sourceOf } from "../src/core/delta";
 import { Rng } from "../src/core/rng";
 import { methodText } from "../src/core/methodText";
@@ -23,9 +23,9 @@ function synth(n: number, seed: number, labels: [string, string] = ["resp", "no"
 const base = { patientColumn: null, clinicalIdColumn: "CaseLabel", outcomeColumn: "outcome", positiveLabel: "resp" };
 const opts = (seed = 1) => ({ seed, pluginVersion: "0.3.0", now: () => "2026-10-27T00:00:00Z" });
 
-describe("R2 discrimination recipe", () => {
+describe("R2 discrimination skill", () => {
   it("finds the planted features, combines them and validates by LOO", async () => {
-    const { record, state } = await runRecipe(R2_DISCRIMINATION, synth(120, 21), { ...base, tree: true, mcIterations: 200 }, opts());
+    const { record, state } = await runSkill(R2_DISCRIMINATION, synth(120, 21), { ...base, tree: true, mcIterations: 200 }, opts());
     expect(record.status).toBe("ok");
     const st = state.r2 as R2State;
     const a = st.rows.find((r) => r.feature === "f_a")!, noise = st.rows.filter((r) => r.feature.startsWith("f_noise"));
@@ -45,7 +45,7 @@ describe("R2 discrimination recipe", () => {
     expect(treeCsv(st.tree!.root, st.context.names)).toContain("f_a");
   });
   it("does not turn an unanalysable feature into an AUC (missing is not 0)", async () => {
-    const { state } = await runRecipe(R2_DISCRIMINATION, synth(80, 5), base, opts());
+    const { state } = await runSkill(R2_DISCRIMINATION, synth(80, 5), base, opts());
     const st = state.r2 as R2State;
     const sp = st.rows.find((r) => r.feature === "f_sparse")!;
     expect(sp.error).toMatch(/解析できません/);
@@ -55,26 +55,26 @@ describe("R2 discrimination recipe", () => {
     expect(st.comparisons).toBe(st.rows.length - 1);
   });
   it("is reproducible for the same seed (tree and Monte Carlo included)", async () => {
-    const run = (seed: number) => runRecipe(R2_DISCRIMINATION, synth(90, 8), { ...base, tree: true, mcIterations: 300 }, opts(seed));
+    const run = (seed: number) => runSkill(R2_DISCRIMINATION, synth(90, 8), { ...base, tree: true, mcIterations: 300 }, opts(seed));
     const a = await run(3), b = await run(3), c = await run(4);
     expect(b.record).toEqual(a.record);
     expect((b.state.r2 as R2State).tree!.mc).toEqual((a.state.r2 as R2State).tree!.mc);
     expect((c.state.r2 as R2State).tree!.mc.means).not.toEqual((a.state.r2 as R2State).tree!.mc.means);
   });
   it("stops with a reason for no positive label, an unknown label, three labels, and a tiny group (negative)", async () => {
-    const err = async (inputs: ReturnType<typeof synth>, params: Record<string, unknown>) => (await runRecipe(R2_DISCRIMINATION, inputs, params as never, opts())).record.steps.at(-1)!.errors.join();
+    const err = async (inputs: ReturnType<typeof synth>, params: Record<string, unknown>) => (await runSkill(R2_DISCRIMINATION, inputs, params as never, opts())).record.steps.at(-1)!.errors.join();
     expect(await err(synth(60, 1), { ...base, positiveLabel: null })).toMatch(/陽性とするラベルを選んでください/);
     expect(await err(synth(60, 1), { ...base, positiveLabel: "zzz" })).toMatch(/にありません/);
     expect(await err(synth(60, 1, ["resp", "no"], (i) => (i % 7 === 0 ? "mid" : i % 2 ? "resp" : "no")), base)).toMatch(/2 種類にしてください/);
     expect(await err(synth(60, 1, ["resp", "no"], (i) => (i < 3 ? "resp" : "no")), base)).toMatch(/各群 5 人以上/);
   });
   it("makes no combination when fewer than two features meet the criterion, and says why", async () => {
-    const { record, state } = await runRecipe(R2_DISCRIMINATION, synth(40, 2), { ...base, alpha: 1e-6 }, opts());
+    const { record, state } = await runSkill(R2_DISCRIMINATION, synth(40, 2), { ...base, alpha: 1e-6 }, opts());
     expect(record.steps.find((s) => s.id === "combination")!.status).toBe("skipped");
     expect((state.r2 as R2State).combo!.notes.join()).toMatch(/組み合わせは作りません/);
   });
   it("writes the method text with the labels, the criterion and the LOO", async () => {
-    const { record } = await runRecipe(R2_DISCRIMINATION, synth(100, 21), { ...base, tree: true, mcIterations: 100 }, opts());
+    const { record } = await runSkill(R2_DISCRIMINATION, synth(100, 21), { ...base, tree: true, mcIterations: 100 }, opts());
     const ja = methodText(record, R2_DISCRIMINATION, "ja"), en = methodText(record, R2_DISCRIMINATION, "en");
     expect(ja).toContain("Clopper–Pearson");
     expect(ja).toContain("leave-one-out");

@@ -1,7 +1,7 @@
 import { blandAltmanFor } from "../core/r3";
 import type { ReliabilityRow } from "../core/r3";
 import type { IccCategory } from "../core/reliability/icc";
-import type { R3State } from "../core/recipes";
+import type { R3State } from "../core/skills";
 import { h } from "./dom";
 import type { Key } from "./i18n";
 import { xyChart } from "./xyChart";

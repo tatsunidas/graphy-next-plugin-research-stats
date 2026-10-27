@@ -1,5 +1,5 @@
 /**
- * レシピ P4「予測モデルの性能（入れ子の交差検証とテスト集合）」の計算本体。画面・recipes.ts に依存しない。
+ * スキル P4「予測モデルの性能（入れ子の交差検証とテスト集合）」の計算本体。画面・skills.ts に依存しない。
  *
  * 流れ: 対象（結果の型）→ テスト集合（固定ファイルを作る／読む／作らない）→ 品質管理（開発集合だけ）
  * → 欠損の扱い → 入れ子の交差検証（開発集合）→ 最終モデル → [テスト集合で評価（固定ファイルの回数を 1 増やす）]。
@@ -8,7 +8,7 @@
  * 利用者が入れるまで実行しない。
  */
 import type { Dataset, TableSource } from "./dataset";
-import type { ParamValue } from "./recipe";
+import type { ParamValue } from "./skill";
 import { Rng } from "./rng";
 import { binaryCohort } from "./r2";
 import { survivalCohort } from "./r1";
@@ -174,7 +174,7 @@ export async function splitCohort(c: P4Cohort, p: P4Params, rng: Rng, lockText: 
 /** R3 の除外候補 CSV などから、"feature" 列の名前を読む。 */
 export function exclusionNames(src: TableSource): string[] | { error: string } {
   const j = src.table.header.indexOf("feature");
-  if (j < 0) return { error: `${src.name}: 「feature」列がありません（再現性のレシピの除外候補 CSV を使ってください）` };
+  if (j < 0) return { error: `${src.name}: 「feature」列がありません（再現性のスキルの除外候補 CSV を使ってください）` };
   return src.table.rows.map((r) => String(r[j] ?? "").trim()).filter((x) => x !== "");
 }
 

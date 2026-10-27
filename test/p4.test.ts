@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runRecipe } from "../src/core/engine";
-import { P4_PIPELINE, type P4State } from "../src/core/recipes";
+import { runSkill } from "../src/core/engine";
+import { P4_PIPELINE, type P4State } from "../src/core/skills";
 import { sourceOf } from "../src/core/delta";
 import { Rng } from "../src/core/rng";
 import { methodText } from "../src/core/methodText";
@@ -28,10 +28,10 @@ const base = { patientColumn: null, clinicalIdColumn: "CaseLabel", outcomeColumn
 const binary = { ...base, outcomeKind: "binary", positiveLabel: "resp", outerK: 5, innerK: 4, repeats: 1, kCandidates: "1, 2, 4" };
 const opts = (seed = 1) => ({ seed, pluginVersion: "0.5.0", now: () => "2026-10-27T00:00:00Z" });
 const run = (inputs: ReturnType<typeof synth> & { lock?: { name: string; text: string }; exclusion?: ReturnType<typeof sourceOf> }, params: Record<string, unknown>, seed = 1) =>
-  runRecipe(P4_PIPELINE, inputs, params as never, opts(seed));
+  runSkill(P4_PIPELINE, inputs, params as never, opts(seed));
 const lastError = (r: Awaited<ReturnType<typeof run>>) => r.record.steps.flatMap((s) => s.errors).join(" / ");
 
-describe("P4 pipeline recipe", () => {
+describe("P4 pipeline skill", () => {
   it("does not run until the settings without defaults are chosen", async () => {
     const d = synth(60, 1);
     expect(lastError(await run(d, { ...base }))).toMatch(/結果の型/);
@@ -113,7 +113,7 @@ describe("P4 pipeline recipe", () => {
     expect((im.state.p4 as P4State).qc!.dev.length).toBe(90);
   });
 
-  it("exclusion list from the reproducibility recipe removes features", async () => {
+  it("exclusion list from the reproducibility skill removes features", async () => {
     const d = synth(60, 8);
     const ex = sourceOf("ex.csv", "feature,category\nf_n0,poor\nf_zzz,poor\n", null);
     const r = await run({ ...d, exclusion: ex }, { ...binary, lockMode: "none" });

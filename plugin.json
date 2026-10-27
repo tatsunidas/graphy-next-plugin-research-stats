@@ -6,7 +6,7 @@
     "graphy": ">=0.3.2",
     "os": ["win32", "darwin", "linux"]
   },
-  "description": "Research statistics for radiomics studies on GRAPHY-Next: join feature tables with clinical data, build a dataset, and run published analysis recipes. Research use only - not a diagnostic device.",
+  "description": "Research statistics for radiomics studies on GRAPHY-Next: join feature tables with clinical data, build a dataset, and run published analysis skills. Research use only - not a diagnostic device.",
   "author": "Visionary Imaging Services, Inc.",
   "homepage": "https://github.com/tatsunidas/graphy-next-plugin-research-stats",
   "license": "MIT",
