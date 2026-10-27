@@ -6,7 +6,10 @@ import { runSkill, type RunRecord } from "../core/engine";
 import { kmPointsCsv, r1ResultsCsv } from "../core/exportR1";
 import { methodText } from "../core/methodText";
 import type { Locale, ParamValue, Skill } from "../core/skill";
-import { DATASET_CHECK, P4_PIPELINE, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, type P4State, type R1State, type R2State, type R3State } from "../core/skills";
+import { DATASET_CHECK, P4_PIPELINE, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, R5_MODEL, type P4State, type R1State, type R2State, type R3State, type R5State } from "../core/skills";
+import { R5_DEFAULTS } from "../core/r5";
+import { r5ModelCsv, r5SchoenfeldCsv, r5ScreenCsv, r5StepsCsv } from "../core/exportR5";
+import { r5Panel } from "./r5View";
 import { P4_DEFAULTS } from "../core/p4";
 import { p4FoldsCsv, p4PredictionsCsv, p4QcCsv, p4SelectionCsv } from "../core/exportP4";
 import { p4Panel } from "./p4View";
@@ -44,7 +47,7 @@ interface State {
   cancelled: boolean;
   selectedFeature: string | null;
   ba: BaChoice;
-  result: { record: RunRecord; dataset: Dataset | null; report: JoinReport | null; r1: R1State | null; r2: R2State | null; r3: R3State | null; p4: P4State | null } | null;
+  result: { record: RunRecord; dataset: Dataset | null; report: JoinReport | null; r1: R1State | null; r2: R2State | null; r3: R3State | null; p4: P4State | null; r5: R5State | null } | null;
 }
 
 async function readSource(file: File): Promise<TableSource> {
@@ -56,7 +59,7 @@ async function readSource(file: File): Promise<TableSource> {
 /** 研究統計のウィンドウの中身を組み立てる。 */
 export function mountWizard(root: HTMLElement, locale: Locale): void {
   const t = makeT(locale);
-  const s: State = { features: [], clinical: null, baseline: [], followup: [], exclusion: null, lock: null, errors: [], params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS, ...R3_DEFAULTS, ...P4_DEFAULTS }, seed: 1, noSha: false, skill: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, ba: { feature: null, a: 0, b: 1 }, result: null };
+  const s: State = { features: [], clinical: null, baseline: [], followup: [], exclusion: null, lock: null, errors: [], params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS, ...R3_DEFAULTS, ...P4_DEFAULTS, ...R5_DEFAULTS }, seed: 1, noSha: false, skill: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, ba: { feature: null, a: 0, b: 1 }, result: null };
   root.replaceChildren();
   const wrap = h("div", { class: "rs-root", "data-testid": "rs-root" });
   root.append(h("style", {}, CSS), wrap);
@@ -305,15 +308,43 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     return out.filter((x): x is HTMLElement => x !== null);
   }
 
+  function r5Controls(): HTMLElement[] {
+    const p = s.params;
+    const choice = (testId: string, label: string, key: string, options: [string, string][], allowNone: boolean) => {
+      const el = h("select", { "data-testid": testId, onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; s.params = { ...s.params, [key]: v === "" ? null : v }; s.result = null; render(); } },
+        allowNone ? h("option", { value: "" }, t("choose")) : null, ...options.map(([v, l]) => h("option", { value: v }, l)));
+      el.value = p[key] === null || p[key] === undefined ? "" : String(p[key]);
+      return h("div", { class: "rs-row" }, h("label", {}, label), el);
+    };
+    const boost = p.r5Screen === "boost";
+    const out: (HTMLElement | null)[] = [
+      numberRow("rs-r5-corr", t("r5Corr"), "r5Corr", { step: 0.01, min: 0.5, max: 1, emptyIsNull: true }),
+      choice("rs-r5-screen", t("r5Screen"), "r5Screen", [["boost", t("sBoost")], ["lasso", t("sLasso")]], false),
+      boost ? numberRow("rs-r5-iter", t("r5BoostIter"), "r5BoostIterations", { step: 10, min: 1 }) : null,
+      boost ? numberRow("rs-r5-nu", t("r5Nu"), "r5BoostNu", { step: 0.01, min: 0.000001, max: 1, emptyIsNull: true }) : null,
+      boost ? null : numberRow("rs-r5-folds", t("r5LassoFolds"), "r5LassoFolds", { step: 1, min: 2 }),
+      boost ? null : choice("rs-r5-rule", t("r5LassoRule"), "r5LassoRule", [["min", t("ruleMin")], ["1se", t("rule1se")]], true),
+      boost ? null : numberRow("rs-r5-nlambda", t("r5NLambda"), "r5LassoNLambda", { step: 10, min: 2 }),
+      numberRow("rs-r5-pin", t("r5PIn"), "r5PIn", { step: 0.01, min: 0.000001, max: 0.5 }),
+      numberRow("rs-r5-pout", t("r5POut"), "r5POut", { step: 0.01, min: 0.000001, max: 0.5 }),
+      numberRow("rs-r5-max", t("r5MaxVars"), "r5MaxVars", { step: 1, min: 1 }),
+      numberRow("rs-r5-boot", t("r5Boot"), "r5BootstrapB", { step: 100, min: 0 }),
+      h("div", { class: "rs-note", "data-testid": "rs-r5-examples" }, t("r5Examples")),
+      Number(p.r5BootstrapB) > 0 ? h("div", { class: "rs-note", "data-testid": "rs-r5-heavy" }, t("r5Heavy")) : null,
+    ];
+    return out.filter((x): x is HTMLElement => x !== null);
+  }
+
   function skillControls(): HTMLElement {
     const p = s.params;
-    const pick = (id: string) => { s.skill = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE].find((r) => r.id === id) ?? DATASET_CHECK; s.result = null; s.selectedFeature = null; render(); };
+    const pick = (id: string) => { s.skill = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE, R5_MODEL].find((r) => r.id === id) ?? DATASET_CHECK; s.result = null; s.selectedFeature = null; render(); };
     const sel = h("select", { "data-testid": "rs-skill", onchange: (e: Event) => pick((e.target as HTMLSelectElement).value) },
-      h("option", { value: DATASET_CHECK.id }, t("skillCheck")), h("option", { value: R1_PROGNOSIS.id }, t("skillR1")), h("option", { value: R2_DISCRIMINATION.id }, t("skillR2")), h("option", { value: R3_REPRODUCIBILITY.id }, t("skillR3")), h("option", { value: P4_PIPELINE.id }, t("skillP4")));
+      h("option", { value: DATASET_CHECK.id }, t("skillCheck")), h("option", { value: R1_PROGNOSIS.id }, t("skillR1")), h("option", { value: R2_DISCRIMINATION.id }, t("skillR2")), h("option", { value: R3_REPRODUCIBILITY.id }, t("skillR3")), h("option", { value: P4_PIPELINE.id }, t("skillP4")), h("option", { value: R5_MODEL.id }, t("skillR5")));
     sel.value = s.skill.id;
     const out: Node[] = [h("div", { class: "rs-row" }, h("label", {}, t("skill")), sel)];
     if (s.skill.id === R3_REPRODUCIBILITY.id) return h("div", {}, ...out, ...r3Controls());
     if (s.skill.id === P4_PIPELINE.id) return h("div", {}, ...out, ...p4Controls());
+    if (s.skill.id === R5_MODEL.id) return h("div", {}, ...out, ...r5Controls());
     if (s.skill.id === R2_DISCRIMINATION.id) return h("div", {}, ...out, ...r2Controls());
     if (s.skill.id !== R1_PROGNOSIS.id) return h("div", {}, ...out);
     const choice = (testId: string, label: string, key: string, options: [string, string][]) => {
@@ -370,8 +401,9 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       const r2 = (state.r2 as R2State | undefined) ?? null;
       const r3 = (state.r3 as R3State | undefined) ?? null;
       const p4 = (state.p4 as P4State | undefined) ?? null;
+      const r5 = (state.r5 as R5State | undefined) ?? null;
       s.selectedFeature = null;
-      s.result = { record, dataset: (state.dataset as Dataset | undefined) ?? null, report: (state.report as JoinReport | undefined) ?? null, r1, r2, r3, p4 };
+      s.result = { record, dataset: (state.dataset as Dataset | undefined) ?? null, report: (state.report as JoinReport | undefined) ?? null, r1, r2, r3, p4, r5 };
       // 評価したら、回数を 1 増やした固定ファイルを今の固定ファイルにして保存する（次の評価は 2 回目として数える）
       if (p4?.test) {
         s.lock = { name: s.lock?.name ?? "research-stats-test-lock.json", text: `${JSON.stringify(p4.test.lock, null, 2)}\n` };
@@ -418,6 +450,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         list(t("exclusions"), rep.exclusions.map((x) => `${x.id}: ${x.reason}`), "rs-exclusions"),
       ) : null,
       r.p4 ? p4Panel(r.p4, t) : null,
+      r.r5 ? r5Panel(r.r5, t) : null,
       r.p4 && r.p4.final?.model && r.p4.params.lockMode === "use" && !r.p4.test && r.record.status === "ok"
         ? h("div", { "data-testid": "rs-p4-eval-box" },
           h("button", { class: "rs-primary", "data-testid": "rs-p4-evaluate", disabled: s.progress !== null, onclick: () => run(true) }, t("p4Evaluate")),
@@ -444,6 +477,10 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         r.p4?.cv ? h("button", { "data-testid": "rs-save-p4-pred", onclick: () => download(p4PredictionsCsv(r.p4!), "research-stats-p4-predictions.csv", "text/csv;charset=utf-8") }, t("saveP4Pred")) : null,
         r.p4?.cv ? h("button", { "data-testid": "rs-save-p4-sel", onclick: () => download(p4SelectionCsv(r.p4!), "research-stats-p4-selection.csv", "text/csv;charset=utf-8") }, t("saveP4Sel")) : null,
         r.p4?.qc ? h("button", { "data-testid": "rs-save-p4-qc", onclick: () => download(p4QcCsv(r.p4!), "research-stats-p4-qc.csv", "text/csv;charset=utf-8") }, t("saveP4Qc")) : null,
+        r.r5?.model ? h("button", { "data-testid": "rs-save-r5-model", onclick: () => download(r5ModelCsv(r.r5!), "research-stats-r5-model.csv", "text/csv;charset=utf-8") }, t("saveR5Model")) : null,
+        r.r5?.model ? h("button", { "data-testid": "rs-save-r5-steps", onclick: () => download(r5StepsCsv(r.r5!), "research-stats-r5-steps.csv", "text/csv;charset=utf-8") }, t("saveR5Steps")) : null,
+        r.r5?.model ? h("button", { "data-testid": "rs-save-r5-screen", onclick: () => download(r5ScreenCsv(r.r5!), "research-stats-r5-screening.csv", "text/csv;charset=utf-8") }, t("saveR5Screen")) : null,
+        r.r5?.model?.schoenfeld ? h("button", { "data-testid": "rs-save-r5-sch", onclick: () => download(r5SchoenfeldCsv(r.r5!), "research-stats-r5-schoenfeld.csv", "text/csv;charset=utf-8") }, t("saveR5Sch")) : null,
         r.r2 && r.r2.rows.length ? h("button", { "data-testid": "rs-save-r2-results", onclick: () => download(r2ResultsCsv(r.r2!.rows), "research-stats-r2-results.csv", "text/csv;charset=utf-8") }, t("saveR2Results")) : null,
         r.r2?.combo && r.r2.combo.rocLoo.length ? h("button", { "data-testid": "rs-save-curves", onclick: () => download(r2CurvesCsv(r.r2!.combo!), "research-stats-r2-curves.csv", "text/csv;charset=utf-8") }, t("saveCurves")) : null,
         r.r2?.tree ? h("button", { "data-testid": "rs-save-tree", onclick: () => download(treeCsv(r.r2!.tree!.root, r.r2!.context.names), "research-stats-r2-tree.csv", "text/csv;charset=utf-8") }, t("saveTree")) : null,

@@ -2,8 +2,9 @@
  * LASSO（L1 罰則）。二値はロジスティック回帰（切片には罰則をかけない）、生存は Cox（同時刻は Breslow）。
  *
  * 目的関数: −(1/n)·対数尤度 ＋ λ·Σ|β_j|。n は当てはめに使う行の数。
- * 解き方: 尤度を η の対角ヘッセで二次近似し（glmnet と同じ考え方）、重み付き最小二乗の LASSO を座標降下で解く。
- * 近似の解への方向で、目的関数が下がるまでステップを半分にする（目的関数は凸なので、一意の最小に収束する）。
+ * 解き方: 近接ニュートン法。作業集合（係数が 0 でない列と、KKT 条件 |勾配| ≤ λ を破る列）の上で
+ * 尤度を正確なヘッセ行列で二次近似し、その L1 つきの二次の問題を座標降下で解く。目的関数が下がるまでステップを半分にする
+ * （目的関数は凸なので一意の最小に収束する）。作業集合の外の列が KKT 条件を満たし、ステップが十分小さくなったら終わる。
  *
  * 標準化は**当てはめに使う行だけ**の平均・SD（n−1）で行い、係数は標準化した尺度で返す。
  * λ の列は λmax（全係数が 0 になる最小の λ）から λmax·ratio まで対数で等間隔。
@@ -26,11 +27,15 @@ const soft = (x: number, l: number) => (x > l ? x - l : x < -l ? x + l : 0);
 interface Lik {
   n: number;
   intercept: boolean;
-  /** 対数尤度と、η についての勾配・対角の −ヘッセ。 */
+  /** 対数尤度と、η についての勾配（と対角の −ヘッセ）。 */
   eval(eta: number[]): { ll: number; g: number[]; h: number[] };
+  /** 列 W（q は切片＝全部 1 の列）での −∂²ll/∂β∂β。 */
+  hess(Z: number[][], eta: number[], W: number[]): number[][];
   /** 飽和モデルの対数尤度（偏差の基準）。 */
   llSat: number;
 }
+
+const colVal = (Z: number[][], k: number, j: number) => (j === Z[k].length ? 1 : Z[k][j]);
 
 function likOf(task: LassoTask, rows: number[]): Lik {
   if (task.kind === "binary") {
@@ -48,13 +53,51 @@ function likOf(task: LassoTask, rows: number[]): Lik {
         }
         return { ll, g, h };
       },
+      hess(Z, eta, W) {
+        const H = W.map(() => new Array<number>(W.length).fill(0));
+        for (let k = 0; k < Z.length; k++) {
+          const p = sigmoid(eta[k]), w = p * (1 - p);
+          for (let a = 0; a < W.length; a++) {
+            const xa = w * colVal(Z, k, W[a]);
+            for (let b = 0; b <= a; b++) H[a][b] += xa * colVal(Z, k, W[b]);
+          }
+        }
+        for (let a = 0; a < W.length; a++) for (let b = a + 1; b < W.length; b++) H[a][b] = H[b][a];
+        return H;
+      },
     };
   }
   const s = subSurv(task.surv, rows);
   const r: Risk = riskSets(s);
   let llSat = 0;
   for (const grp of r.groups) if (grp.d > 0) llSat -= grp.d * Math.log(grp.d);
-  return { n: rows.length, intercept: false, llSat, eval: (eta) => breslow(s, r, eta) };
+  return {
+    n: rows.length, intercept: false, llSat, eval: (eta) => breslow(s, r, eta),
+    hess(Z, eta, W) {
+      // Breslow: Σ_時刻 d·(S2/S0 − S1·S1ᵀ/S0²)。リスク集合は時間の遅い方から足す
+      const m = W.length;
+      let c = -Infinity;
+      for (const e of eta) if (e > c) c = e;
+      const H = Array.from({ length: m }, () => new Array<number>(m).fill(0));
+      let S0 = 0;
+      const S1 = new Array<number>(m).fill(0), S2 = Array.from({ length: m }, () => new Array<number>(m).fill(0));
+      for (let k = r.groups.length - 1; k >= 0; k--) {
+        const grp = r.groups[k];
+        for (let q = grp.start; q < grp.end; q++) {
+          const i = r.order[q], w = Math.exp(eta[i] - c);
+          S0 += w;
+          for (let a = 0; a < m; a++) {
+            const xa = w * Z[i][W[a]];
+            S1[a] += xa;
+            for (let b = 0; b <= a; b++) S2[a][b] += xa * Z[i][W[b]];
+          }
+        }
+        if (grp.d > 0) for (let a = 0; a < m; a++) for (let b = 0; b <= a; b++) H[a][b] += grp.d * (S2[a][b] / S0 - (S1[a] * S1[b]) / (S0 * S0));
+      }
+      for (let a = 0; a < m; a++) for (let b = a + 1; b < m; b++) H[a][b] = H[b][a];
+      return H;
+    },
+  };
 }
 
 export interface Coef {
@@ -75,60 +118,57 @@ export function solveLasso(lik: Lik, Z: number[][], lambda: number, init: Coef):
   let eta = etaOf(Z, cur);
   let ev = lik.eval(eta);
   let F = -ev.ll / n + lambda * penalty(cur.beta);
-  const colA = new Array<number>(q);
-  for (let it = 0; it < 500; it++) {
-    const w = ev.h.map((h) => (h > 1e-12 ? h / n : 0));
-    const z = eta.map((e, k) => (w[k] > 0 ? e + ev.g[k] / ev.h[k] : e));
-    // 重み付き最小二乗の LASSO: (1/2)Σ w_k (z_k − b0 − Z_k β)² + λ|β|₁
-    const nxt: Coef = { b0: cur.b0, beta: [...cur.beta] };
-    const res = z.map((zk, k) => zk - eta[k]);
-    for (let j = 0; j < q; j++) { let a = 0; for (let k = 0; k < Z.length; k++) a += w[k] * Z[k][j] * Z[k][j]; colA[j] = a; }
-    const sweep = (only: number[] | null): number => {
+  for (let it = 0; it < 200; it++) {
+    // −(1/n)ll の β についての勾配
+    const G = new Array<number>(q).fill(0);
+    for (let k = 0; k < Z.length; k++) { const gk = ev.g[k]; if (gk !== 0) for (let j = 0; j < q; j++) G[j] -= Z[k][j] * gk; }
+    for (let j = 0; j < q; j++) G[j] /= n;
+    const G0 = lik.intercept ? -ev.g.reduce((a, b) => a + b, 0) / n : 0;
+    const tolK = 1e-12 * Math.max(1, lambda);
+    const W = Array.from({ length: q }, (_, j) => j).filter((j) => cur.beta[j] !== 0 || Math.abs(G[j]) > lambda + tolK);
+    if (lik.intercept) W.push(q);
+    if (!W.length) return { coef: cur, iterations: it };
+    const H = lik.hess(Z, eta, W).map((row) => row.map((v) => v / n));
+    const gW = W.map((j) => (j === q ? G0 : G[j]));
+    const cW = W.map((j) => (j === q ? cur.b0 : cur.beta[j]));
+    // 二次の問題 gᵀd + ½dᵀHd + λΣ|c+d| を座標降下で解く（切片は罰則なし）
+    const d = new Array<number>(W.length).fill(0);
+    const Hd = new Array<number>(W.length).fill(0);
+    for (let sweep = 0; sweep < 100000; sweep++) {
       let maxd = 0;
-      if (lik.intercept) {
-        let sw = 0, sr = 0;
-        for (let k = 0; k < Z.length; k++) { sw += w[k]; sr += w[k] * res[k]; }
-        if (sw > 0) { const d = sr / sw; nxt.b0 += d; for (let k = 0; k < Z.length; k++) res[k] -= d; maxd = Math.max(maxd, Math.abs(d)); }
+      for (let a = 0; a < W.length; a++) {
+        const A = H[a][a];
+        if (!(A > 0)) continue;
+        const cc = gW[a] + Hd[a] - A * d[a];
+        const u = W[a] === q ? cW[a] - cc / A : soft(A * cW[a] - cc, lambda) / A;
+        const nd = u - cW[a], delta = nd - d[a];
+        if (delta !== 0) {
+          for (let b = 0; b < W.length; b++) Hd[b] += H[b][a] * delta;
+          d[a] = nd;
+          maxd = Math.max(maxd, Math.abs(delta) * Math.sqrt(A));
+        }
       }
-      const js = only ?? Array.from({ length: q }, (_, j) => j);
-      for (const j of js) {
-        if (!(colA[j] > 0)) continue;
-        let c = 0;
-        for (let k = 0; k < Z.length; k++) c += w[k] * Z[k][j] * res[k];
-        c += colA[j] * nxt.beta[j];
-        const b = soft(c, lambda) / colA[j];
-        const d = b - nxt.beta[j];
-        if (d !== 0) { for (let k = 0; k < Z.length; k++) res[k] -= d * Z[k][j]; nxt.beta[j] = b; maxd = Math.max(maxd, Math.abs(d) * Math.sqrt(colA[j])); }
-      }
-      return maxd;
-    };
-    for (let outer = 0; outer < 1000; outer++) {
-      const full = sweep(null);
-      if (full < 1e-13) break;
-      const active = nxt.beta.map((b, j) => (b !== 0 ? j : -1)).filter((j) => j >= 0);
-      for (let inner = 0; inner < 10000; inner++) if (sweep(active) < 1e-13) break;
+      if (maxd < 1e-15) break;
     }
-    // 近似の解への方向で、目的関数が下がるまで半分にする
-    const d0 = nxt.b0 - cur.b0, d = nxt.beta.map((b, j) => b - cur.beta[j]);
-    const step = Math.max(Math.abs(d0), ...d.map(Math.abs), 0);
-    if (step < 1e-11) return { coef: cur, iterations: it };
+    const step = Math.max(0, ...d.map(Math.abs));
+    if (step < 1e-12) return { coef: cur, iterations: it };
     let t = 1, accepted = false;
-    for (let hh = 0; hh < 50; hh++) {
-      const cand: Coef = { b0: cur.b0 + t * d0, beta: cur.beta.map((b, j) => (t === 1 ? nxt.beta[j] : b + t * d[j])) };
+    for (let hh = 0; hh < 60; hh++) {
+      const cand: Coef = { b0: cur.b0, beta: [...cur.beta] };
+      W.forEach((j, a) => { const v = t === 1 ? cW[a] + d[a] : cW[a] + t * d[a]; if (j === q) cand.b0 = v; else cand.beta[j] = v; });
       const e2 = etaOf(Z, cand);
       const ev2 = lik.eval(e2);
       const F2 = -ev2.ll / n + lambda * penalty(cand.beta);
       if (Number.isFinite(F2) && F2 <= F + 1e-15 * Math.abs(F)) {
-        const small = t * step < 1e-11;
         cur = cand; eta = e2; ev = ev2; F = F2; accepted = true;
-        if (small) return { coef: cur, iterations: it + 1 };
         break;
       }
       t /= 2;
     }
     if (!accepted) return step < 1e-6 ? { coef: cur, iterations: it } : { error: "LASSO の目的関数が下がらず、収束しませんでした" };
+    if (t * step < 1e-11) return { coef: cur, iterations: it + 1 };
   }
-  return { error: "LASSO が 500 回で収束しませんでした" };
+  return { error: "LASSO が 200 回で収束しませんでした" };
 }
 
 export interface Std {

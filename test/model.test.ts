@@ -67,6 +67,8 @@ describe("LASSO logistic vs scikit-learn (saga, unpenalized intercept)", () => {
       expect(Math.abs(r.coef.b0 - f.b0)).toBeLessThan(1e-6);
       r.coef.beta.forEach((b, j) => expect(Math.abs(b - f.beta[j])).toBeLessThan(1e-6));
       expect(r.coef.beta.map((b) => b !== 0)).toEqual(f.beta.map((b) => b !== 0));
+      // 正確なヘッセ行列のニュートン法なので、0 から始めても数回で収束する（実測 4〜5 回。対角だけの近似では 25 回以上）
+      expect(r.iterations).toBeLessThanOrEqual(10);
     });
   }
 });
