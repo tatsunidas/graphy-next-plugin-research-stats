@@ -16,6 +16,10 @@ export interface RunInputs {
   /** 変化率を使うとき: 前の時点・後の時点の特徴量の表。 */
   baseline?: TableSource[];
   followup?: TableSource[];
+  /** 品質管理で除く特徴量の一覧（再現性のレシピの除外候補 CSV など。「feature」列）。 */
+  exclusion?: TableSource;
+  /** テスト集合の固定ファイル（JSON の文字列）。 */
+  lock?: { name: string; text: string };
 }
 
 export interface StepOutcome {
@@ -33,6 +37,9 @@ export interface StepContext {
   rng: Rng;
   /** 手順どうしで受け渡す結果（データセットなど）。 */
   state: Record<string, unknown>;
+  /** 実行の開始時刻（記録と同じ文字列）とプラグインの版。 */
+  now: string;
+  pluginVersion: string;
   /**
    * 長い計算の途中で呼ぶ。進み具合を知らせ、画面に制御を返し、取り消されていれば例外を投げる。
    * 呼ぶ頻度は気にしなくてよい（制御を返すのは一定時間ごと）。

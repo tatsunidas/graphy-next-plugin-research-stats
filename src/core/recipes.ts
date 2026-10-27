@@ -18,6 +18,11 @@ import {
   analyzeReliability, buildConditions, exclusionCandidates, R3_DEFAULTS, readR3Params,
   type ConditionData, type R3Params, type ReliabilityRow,
 } from "./r3";
+import {
+  buildCohort, checkSpec, evaluateTest, exclusionNames, featuresFingerprint, finalModel, nestedCv, P4_DEFAULTS, qcAndMissing, readP4Params, specOf, splitCohort, subMatrix,
+  type FinalModel, type NestedCvResult, type P4Cohort, type P4Params, type QcStepResult, type SplitResult, type TestResult,
+} from "./p4";
+import type { NestedCvSpec } from "./pipeline/nestedCv";
 
 const str = (v: ParamValue, name: string): string | null => {
   if (v === null || v === "") return null;
@@ -349,4 +354,150 @@ export const R3_REPRODUCIBILITY: Recipe = {
   ],
 };
 
-export const RECIPES: Recipe[] = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY];
+export interface P4State {
+  params: P4Params;
+  cohort: P4Cohort;
+  split: SplitResult | null;
+  qc: QcStepResult | null;
+  /** 品質管理で残した列の名前と、その列だけの行列（対象の症例の並び）。 */
+  names: string[];
+  X: (number | null)[][];
+  spec: NestedCvSpec | null;
+  cv: NestedCvResult | null;
+  final: FinalModel | null;
+  test: TestResult | null;
+}
+
+const fmt = (v: number | null) => (v === null ? null : Number(v.toFixed(6)));
+
+export const P4_PIPELINE: Recipe = {
+  id: "p4-pipeline",
+  title: { ja: "予測モデルの性能（入れ子の交差検証とテスト集合）", en: "Prediction model performance (nested cross-validation and test set)" },
+  question: {
+    ja: "特徴量から作ったモデルは、作るのに使っていない症例でどのくらい当たるか。",
+    en: "How well does a model built from the features predict cases that were not used to build it?",
+  },
+  sources: [],
+  defaults: { ...DATASET_CHECK.defaults, ...P4_DEFAULTS },
+  steps: [
+    ...DATASET_CHECK.steps,
+    {
+      id: "p4-cohort",
+      title: { ja: "対象と結果", en: "Cohort and outcome" },
+      async run(ctx): Promise<StepOutcome> {
+        const d = ctx.state.dataset as Dataset | undefined;
+        if (!d) return { summary: {}, warnings: [], errors: ["データセットがありません"] };
+        const pr = readP4Params(ctx.params);
+        if ("error" in pr) return { summary: {}, warnings: [], errors: [pr.error] };
+        const c = await buildCohort(d, pr);
+        if ("error" in c) return { summary: {}, warnings: [], errors: [c.error] };
+        ctx.state.p4 = { params: pr, cohort: c, split: null, qc: null, names: [], X: [], spec: null, cv: null, final: null, test: null } satisfies P4State;
+        const left = d.ids.length - c.ids.length;
+        const ev = c.task.kind === "binary" ? c.task.y.reduce((a, b) => a + b, 0) : c.task.surv.event.reduce((a, b) => a + b, 0);
+        return {
+          summary: { outcomeKind: pr.outcomeKind, patients: c.ids.length, positivesOrEvents: ev, features: c.names.length, cohortFingerprint: c.fingerprint },
+          warnings: left ? [`結果が欠けている患者 ${left} 人を除きました`] : [],
+        };
+      },
+    },
+    {
+      id: "p4-split",
+      title: { ja: "テスト集合", en: "Test set" },
+      async run(ctx): Promise<StepOutcome> {
+        const st = ctx.state.p4 as P4State;
+        const r = await splitCohort(st.cohort, st.params, ctx.rng, ctx.inputs.lock?.text ?? null, ctx.pluginVersion, ctx.now);
+        if ("error" in r) return { summary: {}, warnings: [], errors: [r.error] };
+        st.split = r;
+        const warnings: string[] = [];
+        if (r.lockIsNew) warnings.push("テスト集合の固定ファイルを作りました。保存してください。テスト集合での評価は、保存したファイルを読み込んでから行います");
+        if (st.params.lockMode === "none") warnings.push("テスト集合を作りません（交差検証の推定だけです）");
+        const used = r.lock?.evaluations.length ?? 0;
+        if (!r.lockIsNew && used > 0) warnings.push(`このテスト集合は既に ${used} 回評価されています`);
+        return {
+          summary: { lockMode: st.params.lockMode, dev: r.dev.length, test: r.test.length, lockSha256: r.lock?.sha256 ?? null, lockSeed: r.lock?.seed ?? null, evaluationsBefore: r.lock ? used : null },
+          warnings,
+        };
+      },
+    },
+    {
+      id: "p4-qc",
+      title: { ja: "品質管理と欠損", en: "Quality control and missing values" },
+      run(ctx): StepOutcome {
+        const st = ctx.state.p4 as P4State;
+        const sp = st.split!;
+        let exclude: string[] | null = null;
+        if (ctx.inputs.exclusion) {
+          const ex = exclusionNames(ctx.inputs.exclusion);
+          if ("error" in ex) return { summary: {}, warnings: [], errors: [ex.error] };
+          exclude = ex;
+        }
+        const q = qcAndMissing(st.cohort, sp.dev, sp.test, st.params, exclude);
+        if ("error" in q) return { summary: {}, warnings: [], errors: [q.error] };
+        st.qc = q;
+        st.names = q.keep.map((j) => st.cohort.names[j]);
+        st.X = subMatrix(st.cohort.X, q.keep);
+        const spec = specOf(st.cohort, q.dev, st.params, q.impute);
+        const bad = checkSpec(spec, q.dev.length);
+        if (bad) return { summary: {}, warnings: [], errors: [bad] };
+        st.spec = spec;
+        const warnings: string[] = [];
+        if (q.unknownExcluded.length) warnings.push(`除外リストにあるが表に無い特徴量が ${q.unknownExcluded.length} 個あります: ${q.unknownExcluded.slice(0, 5).join(", ")}`);
+        if (q.droppedDev.length) warnings.push(`欠損のある開発集合の症例 ${q.droppedDev.length} 人を除きました（一覧は結果にあります）`);
+        if (st.names.length > q.dev.length) warnings.push(`特徴量の数（${st.names.length}）が開発集合の症例数（${q.dev.length}）より多く、性能の見積もりの偏りが大きくなりやすい状況です`);
+        return {
+          summary: { featuresBefore: st.cohort.names.length, featuresKept: st.names.length, removed: q.removed.length, excludeList: exclude ? exclude.length : null, missingCells: q.missingCells, missing: st.params.missing, droppedDev: q.droppedDev.length, dev: q.dev.length, ratio: Number((q.dev.length / st.names.length).toFixed(3)) },
+          warnings,
+        };
+      },
+    },
+    {
+      id: "p4-cv",
+      title: { ja: "入れ子の交差検証", en: "Nested cross-validation" },
+      async run(ctx): Promise<StepOutcome> {
+        const st = ctx.state.p4 as P4State;
+        const cv = await nestedCv(st.X, st.cohort.task, st.qc!.dev, st.spec!, ctx.rng, ctx.tick);
+        st.cv = cv;
+        const failed = cv.folds.filter((f) => f.score === null).length;
+        const pooled = cv.pooled.filter((x): x is number => x !== null);
+        return {
+          summary: {
+            outerK: st.spec!.outerK, innerK: st.spec!.innerK, repeats: st.spec!.repeats, kCandidates: st.params.kCandidates.join(","),
+            mean: fmt(cv.summary.mean), min: fmt(cv.summary.min), max: fmt(cv.summary.max), valid: cv.summary.valid, total: cv.summary.total,
+            pooledMean: pooled.length ? fmt(pooled.reduce((a, b) => a + b, 0) / pooled.length) : null,
+          },
+          warnings: failed ? [`${failed} 個の分割は評価できませんでした（理由は結果の表にあります。0 や 0.5 にはしていません）`] : [],
+        };
+      },
+    },
+    {
+      id: "p4-final",
+      title: { ja: "最終モデル", en: "Final model" },
+      run(ctx): StepOutcome {
+        const st = ctx.state.p4 as P4State;
+        const fm = finalModel(st.X, st.cohort.task, st.qc!.dev, st.spec!, ctx.rng);
+        st.final = fm;
+        if (fm.error) return { summary: { k: fm.choice.k }, warnings: [`最終モデルを作れませんでした: ${fm.error}`] };
+        return { summary: { k: fm.choice.k, features: fm.model!.cols.map((j) => st.names[j]).join(" + ") }, warnings: [] };
+      },
+    },
+    {
+      id: "p4-test",
+      title: { ja: "テスト集合での評価", en: "Evaluation on the test set" },
+      async run(ctx): Promise<StepOutcome> {
+        const st = ctx.state.p4 as P4State;
+        if (!st.params.evaluateTest) return { summary: {}, warnings: [], skipped: true };
+        if (st.params.lockMode !== "use" || !st.split?.lock) return { summary: {}, warnings: [], errors: ["テスト集合での評価は、保存した固定ファイルを読み込んで行います"] };
+        const fp = await featuresFingerprint(st.names, st.X);
+        const r = await evaluateTest(st.cohort, st.split.test, st.final!, st.split.lock, st.params, ctx.rng, fp, ctx.now);
+        if ("error" in r) return { summary: {}, warnings: [], errors: [r.error] };
+        st.test = r;
+        const warnings: string[] = [];
+        if (r.evaluation > 1) warnings.push(`このテスト集合での ${r.evaluation} 回目の評価です。報告に回数を書いてください`);
+        if (r.excluded.length) warnings.push(`欠損で予測できないテスト症例 ${r.excluded.length} 人を除きました`);
+        return { summary: { evaluation: r.evaluation, n: r.n, value: fmt(r.value), lower: fmt(r.lower), upper: fmt(r.upper), lockSha256: r.lock.sha256, excluded: r.excluded.length }, warnings };
+      },
+    },
+  ],
+};
+
+export const RECIPES: Recipe[] = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE];
