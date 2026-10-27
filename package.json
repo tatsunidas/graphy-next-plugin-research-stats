@@ -1,6 +1,6 @@
 {
   "name": "graphy-next-plugin-research-stats",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "description": "Research statistics plugin for GRAPHY-Next (dataset building, skills for published radiomics analyses)",
   "type": "module",

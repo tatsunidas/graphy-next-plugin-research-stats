@@ -10,8 +10,8 @@ import { DATASET_CHECK, P4_PIPELINE, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODU
 import { R5_DEFAULTS } from "../core/r5";
 import { r5ModelCsv, r5SchoenfeldCsv, r5ScreenCsv, r5StepsCsv } from "../core/exportR5";
 import { r5Panel } from "./r5View";
-import { P4_DEFAULTS } from "../core/p4";
-import { p4FoldsCsv, p4PredictionsCsv, p4QcCsv, p4SelectionCsv } from "../core/exportP4";
+import { fitCount, P4_DEFAULTS, readP4Params } from "../core/p4";
+import { p4FoldsCsv, p4ImportanceCsv, p4PredictionsCsv, p4QcCsv, p4SelectionCsv } from "../core/exportP4";
 import { p4Panel } from "./p4View";
 import { R3_DEFAULTS } from "../core/r3";
 import { blandAltmanCsv, exclusionCsv, r3ResultsCsv } from "../core/exportR3";
@@ -298,13 +298,15 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       numberRow("rs-p4-repeats", t("p4Repeats"), "repeats", { step: 1, min: 1, max: 100, emptyIsNull: true }),
       (() => {
         const el = h("select", { "data-testid": "rs-p4-model", onchange: (e: Event) => { s.params = { ...s.params, model: (e.target as HTMLSelectElement).value }; s.result = null; render(); } },
-          h("option", { value: "topk" }, t("mTopk")), h("option", { value: "lasso" }, t("mLasso")));
-        el.value = p.model === "lasso" ? "lasso" : "topk";
+          h("option", { value: "topk" }, t("mTopk")), h("option", { value: "lasso" }, t("mLasso")),
+          h("option", { value: "rf" }, t("mRf")), h("option", { value: "svm" }, t("mSvm")), h("option", { value: "gbm" }, t("mGbm")));
+        el.value = typeof p.model === "string" && ["lasso", "rf", "svm", "gbm"].includes(p.model) ? p.model : "topk";
         return h("div", { class: "rs-row" }, h("label", {}, t("p4Model")), el);
       })(),
+      ...mlControls(),
       p.model === "lasso" ? choice("rs-p4-lasso-rule", t("r5LassoRule"), "lassoRule", [["min", t("ruleMin")], ["1se", t("rule1se")]]) : null,
       p.model === "lasso" ? numberRow("rs-p4-nlambda", t("r5NLambda"), "lassoNLambda", { step: 10, min: 2 }) : null,
-      p.model === "lasso" ? null : h("div", { class: "rs-row" }, h("label", {}, t("p4K")), h("input", {
+      p.model !== "topk" ? null : h("div", { class: "rs-row" }, h("label", {}, t("p4K")), h("input", {
         type: "text", value: typeof p.kCandidates === "string" ? p.kCandidates : "", placeholder: "1, 2, 4", "data-testid": "rs-p4-k",
         onchange: (e: Event) => { const v = (e.target as HTMLInputElement).value.trim(); s.params = { ...s.params, kCandidates: v === "" ? null : v }; s.result = null; },
       })),
@@ -314,6 +316,32 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       choice("rs-p4-missing", t("p4Missing"), "missing", [["complete", t("mComplete")], ["impute", t("mImpute")]]),
     );
     return out.filter((x): x is HTMLElement => x !== null);
+  }
+
+  /** 候補の並び（カンマ区切りの文字列のまま持つ）。 */
+  function textRow(testId: string, label: string, key: string, placeholder: string): HTMLElement {
+    const v = s.params[key];
+    return h("div", { class: "rs-row" }, h("label", {}, label), h("input", {
+      type: "text", value: v === null || v === undefined ? "" : String(v), placeholder, "data-testid": testId,
+      onchange: (e: Event) => { const raw = (e.target as HTMLInputElement).value.trim(); s.params = { ...s.params, [key]: raw === "" ? null : raw }; s.result = null; render(); },
+    }));
+  }
+
+  /** ランダムフォレスト・SVM・勾配ブースティングの候補（既定は置かない。scikit-learn の既定を使用例として出す）。 */
+  function mlControls(): (HTMLElement | null)[] {
+    const m = s.params.model;
+    if (m !== "rf" && m !== "svm" && m !== "gbm") return [];
+    const rows: (HTMLElement | null)[] = [h("div", { class: "rs-note", "data-testid": "rs-p4-ml-binary" }, t("p4MlBinaryOnly"))];
+    if (m === "rf") rows.push(numberRow("rs-p4-rf-trees", t("p4RfTrees"), "rfTrees", { step: 1, min: 1, emptyIsNull: true }), textRow("rs-p4-rf-mtry", t("p4RfMtry"), "rfMtry", "sqrt"));
+    if (m === "svm") rows.push(textRow("rs-p4-svm-c", t("p4SvmC"), "svmC", "1"), textRow("rs-p4-svm-gamma", t("p4SvmGamma"), "svmGamma", "scale"));
+    if (m === "gbm") rows.push(textRow("rs-p4-gbm-stages", t("p4GbmStages"), "gbmStages", "100"), textRow("rs-p4-gbm-depth", t("p4GbmDepth"), "gbmDepth", "3"),
+      numberRow("rs-p4-gbm-rate", t("p4GbmRate"), "gbmRate", { step: 0.01, min: 0, max: 1, emptyIsNull: true }),
+      numberRow("rs-p4-gbm-sub", t("p4GbmSub"), "gbmSubsample", { step: 0.1, min: 0, max: 1, emptyIsNull: true }));
+    rows.push(h("div", { class: "rs-note", "data-testid": "rs-p4-ml-examples" }, t(m === "rf" ? "p4RfExamples" : m === "svm" ? "p4SvmExamples" : "p4GbmExamples")));
+    const pr = readP4Params(s.params);
+    const n = "error" in pr ? null : fitCount(pr);
+    rows.push(h("div", { class: "rs-note", "data-testid": "rs-p4-fits" }, n === null ? t("p4FitsUnknown") : t("p4Fits", { n })));
+    return rows;
   }
 
   function r5Controls(): HTMLElement[] {
@@ -484,6 +512,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         r.p4?.cv ? h("button", { "data-testid": "rs-save-p4-folds", onclick: () => download(p4FoldsCsv(r.p4!), "research-stats-p4-folds.csv", "text/csv;charset=utf-8") }, t("saveP4Folds")) : null,
         r.p4?.cv ? h("button", { "data-testid": "rs-save-p4-pred", onclick: () => download(p4PredictionsCsv(r.p4!), "research-stats-p4-predictions.csv", "text/csv;charset=utf-8") }, t("saveP4Pred")) : null,
         r.p4?.cv ? h("button", { "data-testid": "rs-save-p4-sel", onclick: () => download(p4SelectionCsv(r.p4!), "research-stats-p4-selection.csv", "text/csv;charset=utf-8") }, t("saveP4Sel")) : null,
+        r.p4?.final?.model?.importance ? h("button", { "data-testid": "rs-save-p4-imp", onclick: () => download(p4ImportanceCsv(r.p4!), "research-stats-p4-importance.csv", "text/csv;charset=utf-8") }, t("saveP4Imp")) : null,
         r.p4?.qc ? h("button", { "data-testid": "rs-save-p4-qc", onclick: () => download(p4QcCsv(r.p4!), "research-stats-p4-qc.csv", "text/csv;charset=utf-8") }, t("saveP4Qc")) : null,
         r.r5?.model ? h("button", { "data-testid": "rs-save-r5-model", onclick: () => download(r5ModelCsv(r.r5!), "research-stats-r5-model.csv", "text/csv;charset=utf-8") }, t("saveR5Model")) : null,
         r.r5?.model ? h("button", { "data-testid": "rs-save-r5-steps", onclick: () => download(r5StepsCsv(r.r5!), "research-stats-r5-steps.csv", "text/csv;charset=utf-8") }, t("saveR5Steps")) : null,

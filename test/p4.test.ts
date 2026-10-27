@@ -5,7 +5,8 @@ import { sourceOf } from "../src/core/delta";
 import { Rng } from "../src/core/rng";
 import { methodText } from "../src/core/methodText";
 import { parseLock } from "../src/core/pipeline/lockFile";
-import { p4FoldsCsv, p4PredictionsCsv } from "../src/core/exportP4";
+import { p4FoldsCsv, p4ImportanceCsv, p4PredictionsCsv } from "../src/core/exportP4";
+import { parseCsv } from "../src/core/csv";
 
 /** f_a は強く、f_b は中くらいに結果と関係する。f_n* は無関係。f_gap は一部欠損。f_dup は f_a とほぼ同じ。 */
 function synth(n: number, seed: number, o: { gap?: boolean; survival?: boolean; testShift?: (id: string) => number } = {}) {
@@ -148,7 +149,7 @@ describe("P4 pipeline skill", () => {
     expect(ja).toMatch(/入れ子の交差検証/);
     expect(ja).toMatch(/信頼区間は付けない/);
     expect(en).toMatch(/nested cross-validation/);
-    expect(p4FoldsCsv(st).split(/\r?\n/)[0]).toBe("repeat,fold,n_train,n_test,k,lambda,features,score,error");
+    expect(p4FoldsCsv(st).split(/\r?\n/)[0]).toBe("repeat,fold,n_train,n_test,k,lambda,params,features,score,error");
     expect(p4PredictionsCsv(st).split(/\r?\n/).length).toBe(st.qc!.dev.length + 2);
     // 特徴量の数（40）が症例数（30）より多いときは警告する
     const r2 = new Rng(12);
@@ -182,4 +183,64 @@ describe("P4 pipeline skill", () => {
     expect(t.value!).toBeGreaterThan(0.6);
     expect(t.lock.evaluations[0].summary).toHaveProperty("lambda");
   }, 120000);
+});
+
+describe("P4 with random forest, SVM and gradient boosting", () => {
+  const rf = { ...binary, kCandidates: null, model: "rf", rfTrees: 50, rfMtry: "sqrt, 4" };
+  const svm = { ...binary, kCandidates: null, model: "svm", svmC: "0.5, 2", svmGamma: "scale, 0.05" };
+  const gb = { ...binary, kCandidates: null, model: "gbm", gbmStages: "20, 50", gbmDepth: "1, 2", gbmRate: 0.1, gbmSubsample: 1 };
+
+  it("needs every candidate list (no defaults), refuses survival and bad values", async () => {
+    const d = synth(60, 30);
+    expect(lastError(await run(d, { ...rf, rfTrees: null, lockMode: "none" }))).toMatch(/木の数/);
+    expect(lastError(await run(d, { ...rf, rfMtry: null, lockMode: "none" }))).toMatch(/mtry/);
+    expect(lastError(await run(d, { ...svm, svmGamma: null, lockMode: "none" }))).toMatch(/γ/);
+    expect(lastError(await run(d, { ...gb, gbmRate: null, lockMode: "none" }))).toMatch(/学習率/);
+    expect(lastError(await run(d, { ...svm, svmC: "1, abc", lockMode: "none" }))).toMatch(/読めない/);
+    expect(lastError(await run(d, { ...svm, svmC: "1, 1", lockMode: "none" }))).toMatch(/重複/);
+    expect(lastError(await run(d, { ...gb, gbmSubsample: 1.5, lockMode: "none" }))).toMatch(/subsample/);
+    expect(lastError(await run(d, { ...rf, outcomeKind: "survival", stratifySurvival: true, lockMode: "none" }))).toMatch(/二値の結果だけ/);
+  });
+
+  for (const [name, params] of [["rf", rf], ["svm", svm], ["gbm", gb]] as const) {
+    it(`${name}: runs, records the chosen values per fold, writes CSVs and method text, and evaluates the test set`, async () => {
+      const d = synth(120, 31);
+      const c = await run(d, { ...params, lockMode: "create", testFraction: 0.25 });
+      expect(c.record.status).toBe("ok");
+      const st = c.state.p4 as P4State;
+      expect(st.cv!.folds.every((f) => f.params !== null && f.error === null)).toBe(true);
+      expect(st.cv!.pooled[0]!).toBeGreaterThan(0.7);
+      expect(st.final!.model!.cols.length).toBe(st.names.length);
+      const folds = parseCsv(p4FoldsCsv(st));
+      expect(folds.rows.every((r) => String(r[folds.header.indexOf("params")]).length > 0)).toBe(true);
+      const cvStep = c.record.steps.find((s) => s.id === "p4-cv")!;
+      expect(cvStep.summary.gridSize).toBe(name === "rf" ? 2 : 4);
+      expect(cvStep.summary.fits).toBe(1 * 5 * (Number(cvStep.summary.gridSize) * 4 + 1) + Number(cvStep.summary.gridSize) * 4 + 1);
+      const ja = methodText(c.record, P4_PIPELINE, "ja"), en = methodText(c.record, P4_PIPELINE, "en");
+      expect(ja).toMatch(/ハイパーパラメータは候補（/);
+      expect(ja).toMatch(/特徴量の選択は行わず/);
+      expect(en).toMatch(/scikit-learn 1\.9/);
+      if (name === "svm") expect(st.final!.model!.importance).toBeUndefined();
+      else {
+        const imp = parseCsv(p4ImportanceCsv(st));
+        const vals = imp.rows.filter((r) => r[0] !== "params").map((r) => Number(r[1]));
+        expect(vals.reduce((a, b) => a + b, 0)).toBeCloseTo(1, 10);
+        expect(["f_a", "f_dup"]).toContain(imp.rows[0][0]);
+      }
+      const e = await run({ ...d, lock: { name: "l", text: JSON.stringify(st.split!.lock) } }, { ...params, lockMode: "use", evaluateTest: true });
+      expect(e.record.status).toBe("ok");
+      const t = (e.state.p4 as P4State).test!;
+      expect(t.value!).toBeGreaterThan(0.6);
+      expect(t.lock.evaluations[0].summary.model).toBe(name);
+      expect(String(t.lock.evaluations[0].summary.params).length).toBeGreaterThan(0);
+      if (name === "svm") {
+        expect(t.output).toBe("decision");
+        expect(t.calibration).toEqual([]);
+        expect(methodText(e.record, P4_PIPELINE, "ja")).toMatch(/較正は示していない/);
+      } else {
+        expect(t.output).toBe("probability");
+        expect(t.calibration.length).toBeGreaterThan(0);
+      }
+    }, 180000);
+  }
 });
