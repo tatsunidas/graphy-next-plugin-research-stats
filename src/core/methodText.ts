@@ -125,6 +125,36 @@ function p4Lines(record: RunRecord, locale: Locale): string[] {
   return L;
 }
 
+/** R5（予後モデル）の手順の記録から、方法の文を作る。 */
+function r5Lines(record: RunRecord, locale: Locale): string[] {
+  const co = record.steps.find((s) => s.id === "r5-cohort" && s.status === "ok"), md = record.steps.find((s) => s.id === "r5-model" && s.status === "ok");
+  if (!co || !md) return [];
+  const p = record.params, sm = md.summary;
+  const num = (v: unknown) => (typeof v === "number" ? (Number.isInteger(v) ? String(v) : v.toFixed(3)) : "?");
+  const boost = p.r5Screen === "boost";
+  const L: string[] = [];
+  if (locale === "ja") {
+    L.push(`時間とイベントが揃った ${co.summary.patients} 人（イベント ${co.summary.events} 件）を対象とし、欠損の無い ${sm.featuresUsed} 個の特徴量を用いた（欠損で除いた特徴量 ${sm.droppedMissing} 個）。`);
+    L.push(`値が 1 種類の特徴量と、|Spearman の ρ| ≥ ${num(p.r5Corr)} の組の片方（欠損の少ない方、同じなら列の順が先の方を残す）を除いた（${sm.corrRemoved} 個）。`);
+    L.push(boost
+      ? `候補は、成分ごとの尤度ベースの Cox ブースティング（線形の基底、${p.r5BoostIterations} 反復、学習率 ${num(p.r5BoostNu)}、同時刻は Breslow）で係数が 0 でない特徴量とし、変数重要度（減った −対数部分尤度）の順に並べた（${sm.candidates} 個）。このブースティングが R の mboost と同じ値になるかは確かめていない。`
+      : `候補は、LASSO-Cox（同時刻は Breslow、標準化した特徴量）で係数が 0 でない特徴量とした（${sm.candidates} 個）。λ は ${p.r5LassoNLambda} 点の列から ${p.r5LassoFolds} 分割の交差検証（部分尤度の偏差）で${p.r5LassoRule === "1se" ? " 1SE 規則により" : "偏差が最小のものを"}選んだ（λ = ${num(sm.lambda)}）。`);
+    L.push(`候補から多変量 Cox モデル（Efron の近似）による後退選択（Wald の p が ${num(p.r5POut)} を超えたら除き、除いた変数は p < ${num(p.r5PIn)} なら戻す）を行い、${p.r5MaxVars} 個を超えた分は p の大きい順に除いた${Number(sm.capped) > 0 ? `（${sm.capped} 個）` : ""}。選ばれた特徴量: ${sm.selected || "なし"}。`);
+    if (sm.cIndexApparent !== null) L.push(`Harrell の C-index は見かけ ${num(sm.cIndexApparent)}${sm.cIndexCorrected !== null ? `、ブートストラップ（${sm.bootstraps} 回、相関の除外から後退選択までを毎回やり直す）で楽観を補正して ${num(sm.cIndexCorrected)}（楽観 ${num(sm.optimism)}）` : ""}。`);
+    if (sm.phGlobalP !== null) L.push(`比例ハザードの仮定は、スケールした Schoenfeld 残差と Grambsch–Therneau の検定（時間は 1 − Kaplan–Meier）で確かめた（全体 p = ${num(sm.phGlobalP)}）。`);
+  } else {
+    L.push(`${co.summary.patients} patients with time and event (${co.summary.events} events) were included, using the ${sm.featuresUsed} features without missing values (${sm.droppedMissing} features with missing values removed).`);
+    L.push(`Features with a single value, and one of each pair with |Spearman's rho| >= ${num(p.r5Corr)} (keeping the one with fewer missing values, then the earlier column), were removed (${sm.corrRemoved}).`);
+    L.push(boost
+      ? `Candidates were the features with non-zero coefficients in component-wise likelihood-based Cox boosting (linear base learners, ${p.r5BoostIterations} iterations, learning rate ${num(p.r5BoostNu)}, Breslow ties), ordered by variable importance (reduction in -log partial likelihood) (${sm.candidates}). Whether this boosting gives the same values as R's mboost has not been checked.`
+      : `Candidates were the features with non-zero coefficients in LASSO-Cox (Breslow ties, standardised features) (${sm.candidates}); lambda was chosen from ${p.r5LassoNLambda} values by ${p.r5LassoFolds}-fold cross-validation of the partial-likelihood deviance using ${p.r5LassoRule === "1se" ? "the 1-SE rule" : "the minimum"} (lambda = ${num(sm.lambda)}).`);
+    L.push(`Backward selection with multivariable Cox models (Efron) removed variables with Wald p > ${num(p.r5POut)} and re-entered removed ones with p < ${num(p.r5PIn)}; beyond ${p.r5MaxVars} variables, those with the largest p were removed${Number(sm.capped) > 0 ? ` (${sm.capped})` : ""}. Selected features: ${sm.selected || "none"}.`);
+    if (sm.cIndexApparent !== null) L.push(`Harrell's C-index was ${num(sm.cIndexApparent)} (apparent)${sm.cIndexCorrected !== null ? ` and ${num(sm.cIndexCorrected)} after bootstrap optimism correction (${sm.bootstraps} resamples, repeating everything from the correlation filter to backward selection; optimism ${num(sm.optimism)})` : ""}.`);
+    if (sm.phGlobalP !== null) L.push(`Proportional hazards were checked with scaled Schoenfeld residuals and the Grambsch-Therneau test (time transformed by 1 - Kaplan-Meier; global p = ${num(sm.phGlobalP)}).`);
+  }
+  return L;
+}
+
 export function methodText(record: RunRecord, skill: Skill, locale: Locale): string {
   const join = record.steps.find((s) => s.id === "join");
   const delta = record.steps.find((s) => s.id === "delta" && s.status === "ok");
@@ -141,7 +171,7 @@ export function methodText(record: RunRecord, skill: Skill, locale: Locale): str
       if (join.summary.survivalUsable !== null && join.summary.survivalUsable !== undefined) lines.push(`時間とイベントが揃った患者は ${join.summary.survivalUsable} 人であった。`);
       lines.push("欠損は 0 で補わず、欠損のまま扱った（複数病変の平均は欠損を除いて求めた）。");
     }
-    lines.push(...r1Lines(record, "ja"), ...r2Lines(record, "ja"), ...r3Lines(record, "ja"), ...p4Lines(record, "ja"));
+    lines.push(...r1Lines(record, "ja"), ...r2Lines(record, "ja"), ...r3Lines(record, "ja"), ...p4Lines(record, "ja"), ...r5Lines(record, "ja"));
     lines.push(`乱数シード: ${record.seed}。${changed.length ? `既定値から変更した設定: ${changed.join("、")}。` : "設定は既定値のままであった。"}`);
     lines.push("研究用であり、診断・治療の判断に用いない。");
   } else {
@@ -153,7 +183,7 @@ export function methodText(record: RunRecord, skill: Skill, locale: Locale): str
       if (join.summary.survivalUsable !== null && join.summary.survivalUsable !== undefined) lines.push(`${join.summary.survivalUsable} patients had both time and event.`);
       lines.push("Missing values were not filled with 0 and were kept missing (the mean over several lesions ignores missing values).");
     }
-    lines.push(...r1Lines(record, "en"), ...r2Lines(record, "en"), ...r3Lines(record, "en"), ...p4Lines(record, "en"));
+    lines.push(...r1Lines(record, "en"), ...r2Lines(record, "en"), ...r3Lines(record, "en"), ...p4Lines(record, "en"), ...r5Lines(record, "en"));
     lines.push(`Random seed: ${record.seed}. ${changed.length ? `Settings changed from the defaults: ${changed.join("; ")}.` : "All settings were the defaults."}`);
     lines.push("For research use only; not for diagnostic or treatment decisions.");
   }

@@ -23,6 +23,7 @@ import {
   type FinalModel, type NestedCvResult, type P4Cohort, type P4Params, type QcStepResult, type SplitResult, type TestResult,
 } from "./p4";
 import type { NestedCvSpec } from "./pipeline/nestedCv";
+import { r5Model, R5_DEFAULTS, readR5Params, type R5Model, type R5Params } from "./r5";
 
 const str = (v: ParamValue, name: string): string | null => {
   if (v === null || v === "") return null;
@@ -500,4 +501,75 @@ export const P4_PIPELINE: Skill = {
   ],
 };
 
-export const SKILLS: Skill[] = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE];
+export interface R5State {
+  params: R5Params;
+  cohort: SurvivalCohort;
+  /** 対象の患者 ID（cohort.patients の並び）。 */
+  ids: string[];
+  names: string[];
+  model: R5Model | null;
+}
+
+export const R5_MODEL: Skill = {
+  id: "r5-model",
+  title: { ja: "少数の特徴で予後モデル（R5）", en: "Prognostic model with few features (R5)" },
+  question: {
+    ja: "少数の特徴量で、生存（または無増悪生存など）を予測するモデルを作れるか。その性能は楽観を補正するとどの程度か。",
+    en: "Can a model with a few features predict survival (or progression-free survival, etc.), and how good is it after correcting for optimism?",
+  },
+  sources: [
+    "Salazar P et al. PLoS One 2024 (PMID 39739866)",
+    "Harrell FE et al. Stat Med 1996 (PMID 8668867)",
+    "Grambsch PM, Therneau TM. Biometrika 1994 (doi 10.1093/biomet/81.3.515)",
+  ],
+  defaults: { ...DATASET_CHECK.defaults, ...R5_DEFAULTS },
+  steps: [
+    ...DATASET_CHECK.steps,
+    {
+      id: "r5-cohort",
+      title: { ja: "生存解析の対象", en: "Survival cohort" },
+      run(ctx): StepOutcome {
+        const d = ctx.state.dataset as Dataset | undefined;
+        if (!d) return { summary: {}, warnings: [], errors: ["データセットがありません"] };
+        const pr = readR5Params(ctx.params);
+        if ("error" in pr) return { summary: {}, warnings: [], errors: [pr.error] };
+        const cohort = survivalCohort(d);
+        if ("error" in cohort) return { summary: {}, warnings: [], errors: [cohort.error] };
+        ctx.state.r5 = { params: pr, cohort, ids: cohort.patients.map((i) => d.ids[i]), names: d.featureNames, model: null } satisfies R5State;
+        const events = cohort.surv.event.reduce((a, b) => a + b, 0);
+        const warnings: string[] = [];
+        if (d.ids.length - cohort.patients.length > 0) warnings.push(`時間かイベントが欠けている患者 ${d.ids.length - cohort.patients.length} 人を除きました`);
+        if (pr.screen === "boost") warnings.push("Cox ブースティングは、論文で使われた R の mboost と同じ値になるとは言えません（論文に式が無く、R での照合もしていません）");
+        return { summary: { patients: cohort.patients.length, events, features: d.featureNames.length }, warnings };
+      },
+    },
+    {
+      id: "r5-model",
+      title: { ja: "選択・モデル・補正 C-index・比例ハザードの確認", en: "Selection, model, corrected C-index and proportional hazards" },
+      async run(ctx): Promise<StepOutcome> {
+        const st = ctx.state.r5 as R5State;
+        const d = ctx.state.dataset as Dataset;
+        const values = st.names.map((_, j) => st.cohort.patients.map((i) => d.features[i][j]));
+        const m = await r5Model(st.cohort.surv, values, st.names, st.params, ctx.rng, ctx.tick);
+        if ("error" in m) return { summary: {}, warnings: [], errors: [m.error] };
+        st.model = m;
+        const r = m.result;
+        const nm = (cols: number[]) => cols.map((j) => st.names[j]).join(", ");
+        return {
+          summary: {
+            featuresUsed: m.used.length, droppedMissing: m.droppedMissing.length, corrRemoved: r.corrRemoved.length,
+            screen: st.params.screen, candidates: r.candidates.length, selected: nm(r.selected), nSelected: r.selected.length,
+            capped: r.steps.filter((x) => x.action === "cap").length,
+            lambda: r.lasso ? r.lasso.lambda : null,
+            cIndexApparent: m.cApparent, cIndexCorrected: m.corrected?.corrected ?? null, optimism: m.corrected?.optimism ?? null,
+            bootstraps: m.corrected?.bootstraps ?? null, bootstrapFailed: m.corrected?.failed ?? null,
+            phGlobalP: m.schoenfeld?.global.p ?? null,
+          },
+          warnings: m.notes,
+        };
+      },
+    },
+  ],
+};
+
+export const SKILLS: Skill[] = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE, R5_MODEL];
