@@ -19,10 +19,10 @@ import {
   type ConditionData, type R3Params, type ReliabilityRow,
 } from "./r3";
 import {
-  buildCohort, checkSpec, evaluateTest, exclusionNames, featuresFingerprint, finalModel, nestedCv, P4_DEFAULTS, qcAndMissing, readP4Params, specOf, splitCohort, subMatrix,
+  buildCohort, checkSpec, evaluateTest, exclusionNames, featuresFingerprint, finalModel, fitCount, nestedCv, P4_DEFAULTS, qcAndMissing, readP4Params, specOf, splitCohort, subMatrix,
   type FinalModel, type NestedCvResult, type P4Cohort, type P4Params, type QcStepResult, type SplitResult, type TestResult,
 } from "./p4";
-import type { NestedCvSpec } from "./pipeline/nestedCv";
+import { gridOf, gridText, hyperText, type NestedCvSpec } from "./pipeline/nestedCv";
 import { r5Model, R5_DEFAULTS, readR5Params, type R5Model, type R5Params } from "./r5";
 
 const str = (v: ParamValue, name: string): string | null => {
@@ -464,6 +464,7 @@ export const P4_PIPELINE: Skill = {
           summary: {
             outerK: st.spec!.outerK, innerK: st.spec!.innerK, repeats: st.spec!.repeats, model: st.params.model, kCandidates: st.params.kCandidates.join(","),
             lassoRule: st.params.lassoRule, lassoNLambda: st.params.model === "lasso" ? st.params.lassoNLambda : null,
+            grid: st.params.ml ? gridText(st.params.ml) : null, gridSize: st.params.ml ? gridOf(st.params.ml).length : null, fits: fitCount(st.params),
             mean: fmt(cv.summary.mean), min: fmt(cv.summary.min), max: fmt(cv.summary.max), valid: cv.summary.valid, total: cv.summary.total,
             pooledMean: pooled.length ? fmt(pooled.reduce((a, b) => a + b, 0) / pooled.length) : null,
           },
@@ -478,10 +479,18 @@ export const P4_PIPELINE: Skill = {
         const st = ctx.state.p4 as P4State;
         const fm = finalModel(st.X, st.cohort.task, st.qc!.dev, st.spec!, ctx.rng);
         st.final = fm;
-        if (fm.error) return { summary: { k: fm.choice.k, lambda: fm.choice.lambda }, warnings: [`最終モデルを作れませんでした: ${fm.error}`] };
-        const none = fm.model!.cols.length === 0;
+        if (fm.error) return { summary: { k: fm.choice.k, lambda: fm.choice.lambda, params: hyperText(fm.choice.params ?? null) || null }, warnings: [`最終モデルを作れませんでした: ${fm.error}`] };
+        const m = fm.model!;
+        if (st.params.ml) {
+          const top = (m.importance ?? []).map((v, a) => ({ n: st.names[m.cols[a]], v })).sort((x, y) => y.v - x.v).slice(0, 5);
+          return {
+            summary: { k: fm.choice.k, params: hyperText(fm.choice.params ?? null), resolved: hyperText(m.resolved ?? null), output: m.output ?? "probability", importanceTop: top.length ? top.map((x) => `${x.n}:${fmt(x.v)}`).join(" ") : null },
+            warnings: m.output === "decision" ? ["SVM の出力は決定値で、確率ではありません（較正は該当しません）"] : [],
+          };
+        }
+        const none = m.cols.length === 0;
         return {
-          summary: { k: fm.choice.k, lambda: fm.choice.lambda, features: fm.model!.cols.map((j) => st.names[j]).join(" + ") },
+          summary: { k: fm.choice.k, lambda: fm.choice.lambda, features: m.cols.map((j) => st.names[j]).join(" + ") },
           warnings: none ? ["選んだ λ では係数がすべて 0 です（特徴量を使わないモデル。予測はどの症例でも同じ値になります）"] : [],
         };
       },
@@ -500,7 +509,8 @@ export const P4_PIPELINE: Skill = {
         const warnings: string[] = [];
         if (r.evaluation > 1) warnings.push(`このテスト集合での ${r.evaluation} 回目の評価です。報告に回数を書いてください`);
         if (r.excluded.length) warnings.push(`欠損で予測できないテスト症例 ${r.excluded.length} 人を除きました`);
-        return { summary: { evaluation: r.evaluation, n: r.n, value: fmt(r.value), lower: fmt(r.lower), upper: fmt(r.upper), lockSha256: r.lock.sha256, excluded: r.excluded.length }, warnings };
+        if (r.output === "decision") warnings.push("SVM の出力は確率ではないので、較正は出していません");
+        return { summary: { evaluation: r.evaluation, n: r.n, value: fmt(r.value), lower: fmt(r.lower), upper: fmt(r.upper), output: r.output, lockSha256: r.lock.sha256, excluded: r.excluded.length }, warnings };
       },
     },
   ],

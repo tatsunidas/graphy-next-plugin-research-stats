@@ -4,7 +4,8 @@ import { Rng } from "../src/core/rng";
 import { stratifiedFolds, stratifiedHoldout } from "../src/core/pipeline/split";
 import { qcFeatures, spearman } from "../src/core/pipeline/qc";
 import { fitStandardizer, imputeByTrain } from "../src/core/pipeline/preprocess";
-import { finalModel, nestedCv, validateSpec, type NestedCvSpec, type Task } from "../src/core/pipeline/nestedCv";
+import { finalModel, nestedCv, validateSpec, type ModelSpec, type NestedCvSpec, type Task } from "../src/core/pipeline/nestedCv";
+import { scaleGamma, svmFit } from "../src/core/model/svm";
 import { lassoAt, zRow } from "../src/core/model/lasso";
 
 const close = (a: number | null, b: number | null, rel: number, abs = 0) => {
@@ -267,5 +268,75 @@ describe("nested cross-validation with LASSO: preprocessing and predictions", ()
       const e = z.reduce((s, v, j) => s + v * ref.coef.beta[j], ref.coef.b0);
       expect(Math.abs((fm.model.predict(i) as number) - 1 / (1 + Math.exp(-e)))).toBeLessThan(1e-6);
     }
+  });
+});
+
+describe("nested cross-validation with random forest, SVM and gradient boosting", () => {
+  const models: [string, ModelSpec][] = [
+    ["rf", { kind: "rf", trees: 50, mtry: ["sqrt", 8] }],
+    ["svm", { kind: "svm", C: [0.5, 2], gamma: ["scale", 0.01] }],
+    ["gbm", { kind: "gbm", stages: [20, 50], depth: [1, 2], learningRate: 0.1, subsample: 0.8 }],
+  ];
+  const spec = (y: number[], model: ModelSpec, impute = false): NestedCvSpec => ({ outerK: 5, innerK: 4, repeats: 1, kCandidates: [], strata: y, impute, model });
+
+  for (const [name, model] of models) {
+    it(`${name}: random labels give a pooled AUC near 0.5`, async () => {
+      const a: number[] = [];
+      for (const seed of [1, 2, 3, 4]) {
+        const { X, y } = noise(seed + 40, 80, 30);
+        const r = await nestedCv(X, { kind: "binary", y }, X.map((_, i) => i), spec(y, model), new Rng(seed));
+        a.push(r.pooled[0]!);
+      }
+      // 80 人（40 対 40）の AUC の SD はおよそ 0.065。4 回の平均で ±0.1 に収まることを求める
+      expect(Math.abs(a.reduce((s, x) => s + x, 0) / a.length - 0.5)).toBeLessThan(0.1);
+    }, 120000);
+
+    it(`${name}: rows outside the development set do not change the results; the same seed reproduces`, async () => {
+      const { X } = noise(51, 90, 8);
+      const yy = X.map((r, i) => (r[0] - 0.7 * r[1] + 0.5 * (i % 3 === 0 ? 1 : -1) > 0 ? 1 : 0));
+      X.forEach((r, i) => { if (i % 6 === 0) r[3] = null as unknown as number; });
+      const dev = X.map((_, i) => i).filter((i) => i % 5 !== 0);
+      const strata = dev.map((i) => yy[i]);
+      const sp: NestedCvSpec = { ...spec(strata, model, true) };
+      const a = await nestedCv(X, { kind: "binary", y: yy }, dev, sp, new Rng(8));
+      const X2 = X.map((r, i) => (i % 5 === 0 ? r.map((v) => (v === null ? null : v * 30 - 7)) : [...r]));
+      const b = await nestedCv(X2 as number[][], { kind: "binary", y: yy }, dev, sp, new Rng(8));
+      expect(b.folds).toEqual(a.folds);
+      expect(b.pred).toEqual(a.pred);
+      expect(a.pooled[0]!).toBeGreaterThan(0.75);
+      const fa = finalModel(X, { kind: "binary", y: yy }, dev, sp, new Rng(2)), fb = finalModel(X2 as number[][], { kind: "binary", y: yy }, dev, sp, new Rng(2));
+      expect(fb.choice).toEqual(fa.choice);
+      expect(dev.map((i) => fb.model!.predict(i))).toEqual(dev.map((i) => fa.model!.predict(i)));
+    }, 120000);
+  }
+
+  it("SVM final model equals an independent fit on the training-row standardisation with γ = scale", () => {
+    const { X } = noise(61, 70, 5);
+    const Xs = X.map((r) => r.map((v, j) => v * (1 + 4 * j) + 2 * j));
+    const y = X.map((r) => (r[0] + 0.5 * r[2] > 0 ? 1 : 0));
+    const dev = X.map((_, i) => i).filter((i) => i % 7 !== 0);
+    const fm = finalModel(Xs, { kind: "binary", y }, dev, spec(dev.map((i) => y[i]), { kind: "svm", C: [1], gamma: ["scale"] }), new Rng(3));
+    const st = fitStandardizer(Xs, dev, [0, 1, 2, 3, 4]);
+    if ("error" in st) throw new Error(st.error);
+    const z = (r: number[]) => r.map((v, j) => (v - st.means[j]) / st.sds[j]);
+    const m = svmFit(dev.map((i) => z(Xs[i])), dev.map((i) => y[i]), { C: 1, gamma: scaleGamma(dev.map((i) => z(Xs[i]))) });
+    expect(fm.model!.resolved!.gamma).toBeCloseTo(scaleGamma(dev.map((i) => z(Xs[i]))), 14);
+    for (const i of [0, 7, 14, 30]) expect(fm.model!.predict(i)).toBeCloseTo(m.decision(z(Xs[i])), 10);
+  });
+
+  it("chooses the candidate with the higher inner AUC, and validates the grid", async () => {
+    const { X } = noise(71, 100, 4);
+    const y = X.map((r) => (r[0] - r[1] > 0 ? 1 : 0));
+    const all = X.map((_, i) => i);
+    // γ が極端に大きいと、訓練の行以外では決定値がほぼ ρ だけになり AUC が下がる
+    const fm = finalModel(X, { kind: "binary", y }, all, spec(y, { kind: "svm", C: [1], gamma: [1000, 0.1] }), new Rng(1));
+    expect(fm.choice.params).toEqual({ C: 1, gamma: 0.1 });
+    expect(fm.model!.resolved).toEqual({ C: 1, gamma: 0.1 });
+    expect(fm.choice.scores[1]!).toBeGreaterThan(fm.choice.scores[0]!);
+    expect(validateSpec(spec(y, { kind: "rf", trees: 0, mtry: [1] }), 100)).toMatch(/木の数/);
+    expect(validateSpec(spec(y, { kind: "svm", C: [], gamma: ["scale"] }), 100)).toMatch(/C の候補/);
+    expect(validateSpec(spec(y, { kind: "gbm", stages: [10], depth: [2], learningRate: 0, subsample: 1 }), 100)).toMatch(/学習率/);
+    const sv = await nestedCv(X, { kind: "survival", surv: { time: all.map((i) => i + 1), event: all.map(() => 1) } }, all, { ...spec(y, { kind: "rf", trees: 5, mtry: [1] }), strata: null }, new Rng(1));
+    expect(sv.folds.every((f) => f.score === null)).toBe(true);
   });
 });

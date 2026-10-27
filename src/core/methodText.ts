@@ -94,6 +94,15 @@ function p4Lines(record: RunRecord, locale: Locale): string[] {
   const num = (v: unknown) => (typeof v === "number" ? (Number.isInteger(v) ? String(v) : v.toFixed(3)) : "?");
   const strat = bin || p.stratifySurvival === true;
   const lasso = p.model === "lasso";
+  const ml = p.model === "rf" || p.model === "svm" || p.model === "gbm";
+  const mlDesc = (ja: boolean) => p.model === "rf"
+    ? (ja ? "ランダムフォレスト（復元抽出、分岐ごとに mtry 個の特徴量を無作為に選ぶ、Gini、深さの上限なし。確率は各木の葉の割合の平均）" : "a random forest (bootstrap resampling, mtry features drawn at random at each split, Gini impurity, unlimited depth; probability = mean leaf proportion over trees)")
+    : p.model === "svm"
+      ? (ja ? "SVM（C-SVC・RBF カーネル。特徴量は訓練分割の平均・SD で標準化。出力は決定値で、確率ではない）" : "a support vector machine (C-SVC with an RBF kernel; features standardised with the training split's mean and SD; the output is a decision value, not a probability)")
+      : (ja ? "勾配ブースティング（対数損失、回帰木は二乗誤差、葉の値は Newton の一歩）" : "gradient boosting (log loss; regression trees with squared error; Newton-step leaf values)");
+  const mlCv = (ja: boolean) => ja
+    ? `性能は、外側 ${p.outerK} 分割（${strat ? "層化" : "層化しない"}）× ${p.repeats} 回の入れ子の交差検証で見積もった。各訓練分割の中だけで${Number(qc.summary.missingCells) > 0 && p.missing === "impute" ? "、欠損の補完" : ""}と ${mlDesc(true)} の当てはめを行い、ハイパーパラメータは候補（${String(cv.summary.grid)}、${cv.summary.gridSize} 通り）から内側 ${p.innerK} 分割（層化しない）の交差検証（予測を束ねた AUC が最大、同じなら先の候補）で選んだ。特徴量の選択は行わず、使える特徴量をすべて用いた。実装は scikit-learn 1.9 と同じ定義で、乱数を使わない設定で値が一致することを確かめている（乱数は本ツールのシード付き乱数を使うため、scikit-learn と同じ乱数列にはならない）。`
+    : `Performance was estimated by nested cross-validation with ${p.outerK} outer folds (${strat ? "stratified" : "not stratified"}) x ${p.repeats} repeat(s). Within each training split only${Number(qc.summary.missingCells) > 0 && p.missing === "impute" ? ", missing values were imputed and" : ""} ${mlDesc(false)} was fitted; hyperparameters were chosen from the candidates (${String(cv.summary.grid)}; ${cv.summary.gridSize} combinations) by ${p.innerK}-fold inner cross-validation (not stratified; highest pooled AUC, ties to the earlier candidate). No feature selection was done; all usable features were used. The implementation follows the definitions of scikit-learn 1.9 and matches it in settings without randomness (the random numbers come from this tool's seeded generator, so the random streams differ from scikit-learn's).`;
   const sha = (v: unknown) => (typeof v === "string" ? v.slice(0, 12) : "?");
   const qcParts = (ja: boolean) => [
     p.dropConstant ? (ja ? "値が 1 種類しかない特徴量の除外" : "removal of features with a single value") : null,
@@ -108,14 +117,16 @@ function p4Lines(record: RunRecord, locale: Locale): string[] {
     const qp = qcParts(true);
     L.push(`${qp.length ? `開発集合の値だけを使って、${qp.join("、")}を行い（除いた特徴量 ${qc.summary.removed} 個）、` : ""}${qc.summary.featuresKept} 個の特徴量を用いた（開発集合の症例数 / 特徴量の数 = ${num(qc.summary.ratio)}）。`);
     if (Number(qc.summary.missingCells) > 0) L.push(p.missing === "impute" ? "欠損は、各訓練分割の中央値で補った（検証・テストの症例には訓練分割の中央値を当てた）。0 では補っていない。" : `欠損のある開発集合の症例 ${qc.summary.droppedDev} 人を除いた（完全症例）。`);
-    L.push(lasso
+    L.push(ml ? mlCv(true) : lasso
       ? `性能は、外側 ${p.outerK} 分割（${strat ? "層化" : "層化しない"}）× ${p.repeats} 回の入れ子の交差検証で見積もった。各訓練分割の中だけで、欠損の補完・標準化と、${bin ? "L1 罰則つきロジスティック回帰（LASSO、切片は罰則なし）" : "L1 罰則つき Cox 比例ハザードモデル（LASSO-Cox、同時刻は Breslow）"}の当てはめを行い、λ は ${p.lassoNLambda} 点の列（その訓練分割で求めた）から内側 ${p.innerK} 分割（層化しない）の交差検証の偏差で${p.lassoRule === "1se" ? " 1SE 規則により" : "最小のものを"}選んだ。`
       : `性能は、外側 ${p.outerK} 分割（${strat ? "層化" : "層化しない"}）× ${p.repeats} 回、内側 ${p.innerK} 分割（層化しない）の入れ子の交差検証で見積もった。各訓練分割の中だけで、特徴量の順位付け（${bin ? "Mann–Whitney 検定の p" : "単変量 Cox モデルの Wald 検定の p"} の小さい順）、標準化、${bin ? "ロジスティック回帰（罰則なし）" : "Cox 比例ハザードモデル（Efron の近似）"}の当てはめを行い、使う特徴量の数を候補 {${String(p.kCandidates)}} から内側の交差検証（${bin ? "予測を束ねた AUC" : "分割ごとの C-index の平均"} が最大、同じなら少ない方）で選んだ。`);
     L.push(`外側の分割ごとの${bin ? " AUC" : " Harrell の C-index"} は平均 ${num(cv.summary.mean)}（最小 ${num(cv.summary.min)}・最大 ${num(cv.summary.max)}、評価できた分割 ${cv.summary.valid}/${cv.summary.total}）${bin && cv.summary.pooledMean !== null ? `、予測を束ねた AUC は ${num(cv.summary.pooledMean)}（反復の平均）` : ""}であった。交差検証の推定値には信頼区間は付けない（分割の間の相関のため、素朴な区間は狭すぎる）。`);
-    if (fin && fin.summary.k !== null && fin.summary.k !== undefined) L.push(lasso
+    if (fin && fin.summary.k !== null && fin.summary.k !== undefined) L.push(ml
+      ? `最終モデルは、開発集合全体での交差検証でハイパーパラメータを選び（${fin.summary.resolved}）、開発集合全体で作り直した（特徴量 ${fin.summary.k} 個）。入れ子の交差検証の値は、この手順全体の性能の見積もりである。`
+      : lasso
       ? `最終モデルは、開発集合全体での交差検証で λ を選び（λ = ${lam(fin.summary.lambda)}、係数が 0 でない特徴量 ${fin.summary.k} 個）、開発集合全体で解いた（${fin.summary.features || "特徴量なし"}）。入れ子の交差検証の値は、この手順全体の性能の見積もりである。`
       : `最終モデルは、開発集合全体での交差検証で特徴量の数を選び（${fin.summary.k} 個）、開発集合全体で作り直した（${fin.summary.features}）。入れ子の交差検証の値は、この手順全体の性能の見積もりである。`);
-    if (te) L.push(`テスト集合（${te.summary.n} 人）で最終モデルを評価し、${bin ? `AUC ${num(te.summary.value)}（DeLong 法の 95% 信頼区間 ${num(te.summary.lower)}–${num(te.summary.upper)}）` : `C-index ${num(te.summary.value)}（ブートストラップ ${p.testBootstrapB} 回のパーセンタイル 95% 信頼区間 ${num(te.summary.lower)}–${num(te.summary.upper)}）`}を得た。このテスト集合での評価は ${te.summary.evaluation} 回目である。`);
+    if (te) L.push(`テスト集合（${te.summary.n} 人）で最終モデルを評価し、${bin ? `AUC ${num(te.summary.value)}（DeLong 法の 95% 信頼区間 ${num(te.summary.lower)}–${num(te.summary.upper)}）` : `C-index ${num(te.summary.value)}（ブートストラップ ${p.testBootstrapB} 回のパーセンタイル 95% 信頼区間 ${num(te.summary.lower)}–${num(te.summary.upper)}）`}を得た。このテスト集合での評価は ${te.summary.evaluation} 回目である。${te.summary.output === "decision" ? "SVM の出力は確率ではないため、較正は示していない。" : ""}`);
   } else {
     L.push(bin ? `"${p.positiveLabel}" was the positive outcome; ${co.summary.patients} patients (${co.summary.positivesOrEvents} positive) were included.` : `${co.summary.patients} patients with time and event (${co.summary.positivesOrEvents} events) were included.`);
     if (p.lockMode === "none") L.push("No test set was held out; only cross-validated estimates are reported.");
@@ -123,14 +134,16 @@ function p4Lines(record: RunRecord, locale: Locale): string[] {
     const qp = qcParts(false);
     L.push(`${qp.length ? `Using the development set only, quality control comprised ${qp.join("; ")} (${qc.summary.removed} features removed); ` : ""}${qc.summary.featuresKept} features were used (development cases / features = ${num(qc.summary.ratio)}).`);
     if (Number(qc.summary.missingCells) > 0) L.push(p.missing === "impute" ? "Missing values were imputed with the median of each training split (applied to the held-out cases as well); they were not filled with 0." : `${qc.summary.droppedDev} development cases with missing values were excluded (complete cases).`);
-    L.push(lasso
+    L.push(ml ? mlCv(false) : lasso
       ? `Performance was estimated by nested cross-validation with ${p.outerK} outer folds (${strat ? "stratified" : "not stratified"}) x ${p.repeats} repeat(s). Within each training split only, missing values were imputed, features standardised and ${bin ? "an L1-penalised logistic regression (LASSO; intercept not penalised)" : "an L1-penalised Cox model (LASSO-Cox; Breslow ties)"} fitted; lambda was chosen from ${p.lassoNLambda} values (computed on that training split) by the deviance in ${p.innerK}-fold inner cross-validation (not stratified) using ${p.lassoRule === "1se" ? "the 1-SE rule" : "the minimum"}.`
       : `Performance was estimated by nested cross-validation with ${p.outerK} outer folds (${strat ? "stratified" : "not stratified"}) x ${p.repeats} repeat(s) and ${p.innerK} inner folds (not stratified). Within each training split only, features were ranked (${bin ? "Mann-Whitney p value" : "Wald p value of univariable Cox models"}), standardised and ${bin ? "combined by logistic regression (no penalty)" : "combined in a Cox proportional hazards model (Efron's approximation)"}; the number of features was chosen from {${String(p.kCandidates)}} by the inner cross-validation (${bin ? "highest pooled AUC" : "highest mean C-index across folds"}, ties to the smaller number).`);
     L.push(`The outer-fold ${bin ? "AUC" : "Harrell's C-index"} was ${num(cv.summary.mean)} on average (min ${num(cv.summary.min)}, max ${num(cv.summary.max)}; ${cv.summary.valid}/${cv.summary.total} folds evaluable)${bin && cv.summary.pooledMean !== null ? `; the pooled AUC was ${num(cv.summary.pooledMean)} (mean over repeats)` : ""}. No confidence interval is given for the cross-validated estimate (naive intervals are too narrow because the folds are correlated).`);
-    if (fin && fin.summary.k !== null && fin.summary.k !== undefined) L.push(lasso
+    if (fin && fin.summary.k !== null && fin.summary.k !== undefined) L.push(ml
+      ? `The final model chose the hyperparameters by cross-validation on the whole development set (${fin.summary.resolved}) and was refitted on it (${fin.summary.k} features). The nested cross-validation estimates the performance of this whole procedure.`
+      : lasso
       ? `The final model chose lambda by cross-validation on the whole development set (lambda = ${lam(fin.summary.lambda)}; ${fin.summary.k} non-zero coefficients) and was fitted on it (${fin.summary.features || "no features"}). The nested cross-validation estimates the performance of this whole procedure.`
       : `The final model chose the number of features by cross-validation on the whole development set (${fin.summary.k}) and was refitted on it (${fin.summary.features}). The nested cross-validation estimates the performance of this whole procedure.`);
-    if (te) L.push(`On the test set (${te.summary.n} patients) the final model gave ${bin ? `an AUC of ${num(te.summary.value)} (DeLong 95% CI ${num(te.summary.lower)}-${num(te.summary.upper)})` : `a C-index of ${num(te.summary.value)} (bootstrap percentile 95% CI, ${p.testBootstrapB} resamples, ${num(te.summary.lower)}-${num(te.summary.upper)})`}. This was evaluation number ${te.summary.evaluation} on this test set.`);
+    if (te) L.push(`On the test set (${te.summary.n} patients) the final model gave ${bin ? `an AUC of ${num(te.summary.value)} (DeLong 95% CI ${num(te.summary.lower)}-${num(te.summary.upper)})` : `a C-index of ${num(te.summary.value)} (bootstrap percentile 95% CI, ${p.testBootstrapB} resamples, ${num(te.summary.lower)}-${num(te.summary.upper)})`}. This was evaluation number ${te.summary.evaluation} on this test set.${te.summary.output === "decision" ? " Calibration is not shown because the SVM output is not a probability." : ""}`);
   }
   return L;
 }

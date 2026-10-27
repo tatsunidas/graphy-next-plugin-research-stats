@@ -25,6 +25,7 @@ export const CSS = `
 .rs-tablewrap{overflow-x:auto;max-height:340px;overflow-y:auto;border:1px solid var(--line);border-radius:6px}
 .rs-progress{height:8px;border-radius:4px;background:var(--line);overflow:hidden;min-width:240px}
 .rs-progress>div{height:100%;background:var(--accent)}
+.rs-bar{height:8px;background:var(--c1);border-radius:2px;min-width:1px}
 .rs-grid{stroke:var(--grid);stroke-width:1}
 .rs-axisline{stroke:var(--muted);stroke-width:1}
 .rs-axis{fill:var(--fg);font-size:11px}

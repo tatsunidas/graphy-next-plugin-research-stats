@@ -17,7 +17,7 @@ import { aucCi, rocPoints, type RocPoint } from "./discrim/roc";
 import { calibrationBins, type CalibrationBin } from "./discrim/calibration";
 import { cIndex } from "./survival/cindex";
 import { qcFeatures, type QcRemoval } from "./pipeline/qc";
-import { finalModel, nestedCv, validateSpec, type FinalModel, type NestedCvResult, type NestedCvSpec, type Task } from "./pipeline/nestedCv";
+import { finalModel, gridOf, hyperText, nestedCv, validateMl, validateSpec, type FinalModel, type MlSpec, type NestedCvResult, type NestedCvSpec, type Task } from "./pipeline/nestedCv";
 import { stratifiedHoldout } from "./pipeline/split";
 import { addEvaluation, checkLock, fingerprint, parseLock, sealLock, canonicalJson, LOCK_FORMAT, LOCK_VERSION, type LockFile } from "./pipeline/lockFile";
 import { sha256Hex } from "./digest";
@@ -25,6 +25,8 @@ import { sha256Hex } from "./digest";
 export type OutcomeKind = "binary" | "survival";
 export type LockMode = "create" | "use" | "none";
 export type MissingMode = "complete" | "impute";
+export type ModelKind = "topk" | "lasso" | "rf" | "svm" | "gbm";
+const MODELS: ModelKind[] = ["topk", "lasso", "rf", "svm", "gbm"];
 
 export interface P4Params {
   outcomeKind: OutcomeKind;
@@ -36,10 +38,12 @@ export interface P4Params {
   innerK: number;
   repeats: number;
   kCandidates: number[];
-  /** 上位 k 個（罰則なし）か LASSO。 */
-  model: "topk" | "lasso";
+  /** 上位 k 個（罰則なし）、LASSO、ランダムフォレスト・SVM・勾配ブースティング（二値だけ）。 */
+  model: ModelKind;
   lassoRule: LambdaRule | null;
   lassoNLambda: number;
+  /** RF・SVM・GBM の候補の格子（それ以外は null）。 */
+  ml: MlSpec | null;
   dropConstant: boolean;
   correlationThreshold: number | null;
   missing: MissingMode | null;
@@ -61,6 +65,15 @@ export const P4_DEFAULTS: Record<string, ParamValue> = {
   model: "topk",
   lassoRule: null,
   lassoNLambda: 100,
+  // RF・SVM・GBM: 読んだ論文に設定が無いので既定は置かない（画面に scikit-learn の既定を使用例として出す）
+  rfTrees: null,
+  rfMtry: null,
+  svmC: null,
+  svmGamma: null,
+  gbmStages: null,
+  gbmDepth: null,
+  gbmRate: null,
+  gbmSubsample: null,
   dropConstant: false,
   correlationThreshold: null,
   missing: null,
@@ -78,6 +91,48 @@ export function parseKList(v: ParamValue): number[] | { error: string } {
   return [...xs].sort((a, b) => a - b);
 }
 
+/** "0.1, 1, scale" → [0.1, 1, "scale"]。words は数のかわりに書ける語。 */
+export function parseList(v: ParamValue, what: string, words: string[] = []): (number | string)[] | { error: string } {
+  if (typeof v === "number") return [v];
+  if (typeof v !== "string" || v.trim() === "") return { error: `${what}を入れてください（既定値は決めていません）` };
+  const out: (number | string)[] = [];
+  for (const t of v.split(/[,\s、]+/).filter(Boolean)) {
+    if (words.includes(t)) { out.push(t); continue; }
+    const x = Number(t);
+    if (!Number.isFinite(x)) return { error: `${what}に読めない値があります: ${t}` };
+    out.push(x);
+  }
+  return out;
+}
+
+function readMl(p: Record<string, ParamValue>, kind: "rf" | "svm" | "gbm"): MlSpec | { error: string } {
+  const num = (k: string, what: string): number | { error: string } => (typeof p[k] === "number" ? (p[k] as number) : { error: `${what}を入れてください（既定値は決めていません）` });
+  let m: MlSpec;
+  if (kind === "rf") {
+    const trees = num("rfTrees", "木の数"), mtry = parseList(p.rfMtry, "mtry の候補", ["sqrt"]);
+    for (const v of [trees, mtry]) if (typeof v === "object" && "error" in v) return v;
+    m = { kind, trees: trees as number, mtry: mtry as (number | "sqrt")[] };
+  } else if (kind === "svm") {
+    const C = parseList(p.svmC, "C の候補"), gamma = parseList(p.svmGamma, "γ の候補", ["scale"]);
+    for (const v of [C, gamma]) if ("error" in v) return v;
+    m = { kind, C: C as number[], gamma: gamma as (number | "scale")[] };
+  } else {
+    const stages = parseList(p.gbmStages, "段数の候補"), depth = parseList(p.gbmDepth, "木の深さの候補");
+    const lr = num("gbmRate", "学習率"), sub = num("gbmSubsample", "subsample");
+    for (const v of [stages, depth, lr, sub]) if (typeof v === "object" && "error" in v) return v;
+    m = { kind, stages: stages as number[], depth: depth as number[], learningRate: lr as number, subsample: sub as number };
+  }
+  const bad = validateMl(m);
+  return bad ? { error: bad } : m;
+}
+
+/** 入れ子の交差検証の当てはめの回数（格子 × 内側 ＋ 1 を外側 × 反復、最終モデルの分を足す）。 */
+export function fitCount(p: P4Params): number | null {
+  if (!p.ml) return null;
+  const g = gridOf(p.ml).length;
+  return p.repeats * p.outerK * (g * p.innerK + 1) + g * p.innerK + 1;
+}
+
 export function readP4Params(p: Record<string, ParamValue>): P4Params | { error: string } {
   const req = (what: string) => ({ error: `${what}を選んでください（既定値は決めていません）` });
   if (p.outcomeKind !== "binary" && p.outcomeKind !== "survival") return req("結果の型（二値・生存）");
@@ -90,9 +145,15 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
   };
   const outerK = int("outerK", 2, 100000, "外側の分割数"), innerK = int("innerK", 2, 100000, "内側の分割数"), repeats = int("repeats", 1, 100, "反復回数");
   for (const v of [outerK, innerK, repeats]) if (typeof v === "object") return v;
-  if (p.model !== "topk" && p.model !== "lasso") return { error: "モデルは topk か lasso です" };
-  let ks: number[] = [], lassoRule: LambdaRule | null = null, lassoNLambda = 100;
-  if (p.model === "topk") {
+  if (!MODELS.includes(p.model as ModelKind)) return { error: `モデルは ${MODELS.join("・")} のどれかです` };
+  const model = p.model as ModelKind;
+  let ks: number[] = [], lassoRule: LambdaRule | null = null, lassoNLambda = 100, ml: MlSpec | null = null;
+  if (model === "rf" || model === "svm" || model === "gbm") {
+    if (p.outcomeKind !== "binary") return { error: "ランダムフォレスト・SVM・勾配ブースティングは二値の結果だけです（生存のランダムサバイバルフォレストなどは、文献での使われ方を確かめてから決めるため入れていません）" };
+    const r = readMl(p, model);
+    if ("error" in r) return r;
+    ml = r;
+  } else if (model === "topk") {
     const r = parseKList(p.kCandidates);
     if ("error" in r) return r;
     ks = r;
@@ -118,7 +179,7 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
   if (typeof bb !== "number" || !Number.isInteger(bb) || bb < 100 || bb > 100000) return { error: "テストのブートストラップ回数は 100 以上 100000 以下の整数にしてください" };
   return {
     outcomeKind: p.outcomeKind, positiveLabel: p.outcomeKind === "binary" ? (p.positiveLabel as string) : null, lockMode: p.lockMode, testFraction,
-    stratifySurvival: p.stratifySurvival === true, outerK: outerK as number, innerK: innerK as number, repeats: repeats as number, kCandidates: ks, model: p.model, lassoRule, lassoNLambda,
+    stratifySurvival: p.stratifySurvival === true, outerK: outerK as number, innerK: innerK as number, repeats: repeats as number, kCandidates: ks, model, lassoRule, lassoNLambda, ml,
     dropConstant: p.dropConstant === true, correlationThreshold: ct as number | null, missing: (p.missing as MissingMode | null) ?? null,
     evaluateTest: p.evaluateTest === true, calibrationBins: cb, testBootstrapB: bb,
   };
@@ -229,7 +290,7 @@ export function specOf(c: P4Cohort, dev: number[], p: P4Params, impute: boolean)
   const strat = p.outcomeKind === "binary" || p.stratifySurvival ? strataOf(c.task) : null;
   return {
     outerK: p.outerK, innerK: p.innerK, repeats: p.repeats, kCandidates: p.kCandidates, strata: strat ? dev.map((i) => strat[i]) : null, impute,
-    model: p.model === "lasso" ? { kind: "lasso", nLambda: p.lassoNLambda, rule: p.lassoRule as LambdaRule } : { kind: "topk" },
+    model: p.ml ?? (p.model === "lasso" ? { kind: "lasso", nLambda: p.lassoNLambda, rule: p.lassoRule as LambdaRule } : { kind: "topk" }),
   };
 }
 
@@ -254,6 +315,8 @@ export interface TestResult {
   upper: number | null;
   roc: RocPoint[];
   calibration: CalibrationBin[];
+  /** "decision"（SVM）なら確率ではないので、較正は出さない。 */
+  output: "probability" | "decision" | "risk";
   bootstrapFailed: number;
   lock: LockFile;
 }
@@ -281,7 +344,7 @@ export async function evaluateTest(c: P4Cohort, test: number[], fm: FinalModel, 
     const ci = aucCi(l);
     if (ci) { value = ci.auc; lower = ci.lower; upper = ci.upper; }
     roc = rocPoints(l);
-    cal = calibrationBins(l.score, l.label, p.calibrationBins);
+    if (fm.model.output !== "decision") cal = calibrationBins(l.score, l.label, p.calibrationBins);
   } else {
     const s = c.task.surv;
     const sub = (ix: number[]) => ({ time: ix.map((i) => s.time[i]), event: ix.map((i) => s.event[i]) });
@@ -294,6 +357,7 @@ export async function evaluateTest(c: P4Cohort, test: number[], fm: FinalModel, 
     }
     if (bs.length) { bs.sort((a, b) => a - b); lower = percentile(bs, 0.025); upper = percentile(bs, 0.975); }
   }
-  const newLock = await addEvaluation(lock, { at: now, featuresFingerprint: featFp, summary: { metric: c.task.kind === "binary" ? "AUC" : "C-index", value, lower, upper, n: ok.length, k: fm.choice.k, lambda: fm.choice.lambda } });
-  return { evaluation: newLock.evaluations.length, n: ok.length, excluded, value, lower, upper, roc, calibration: cal, bootstrapFailed: bf, lock: newLock };
+  const newLock = await addEvaluation(lock, { at: now, featuresFingerprint: featFp, summary: { metric: c.task.kind === "binary" ? "AUC" : "C-index", value, lower, upper, n: ok.length, k: fm.choice.k, lambda: fm.choice.lambda, ...(fm.choice.params ? { model: p.model, params: hyperText(fm.choice.params) } : {}) } });
+  const output = c.task.kind === "survival" ? "risk" : fm.model.output === "decision" ? "decision" : "probability";
+  return { evaluation: newLock.evaluations.length, n: ok.length, excluded, value, lower, upper, roc, calibration: cal, output, bootstrapFailed: bf, lock: newLock };
 }

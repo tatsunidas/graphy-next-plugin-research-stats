@@ -20,9 +20,43 @@ import type { Surv } from "../survival/types";
 import { fitStandardizer, imputeByTrain, standardizeRow, type Imputed } from "./preprocess";
 import { stratifiedFolds } from "./split";
 import { lassoCv, type LambdaRule } from "../model/lasso";
+import { randomForest, sqrtMtry } from "../model/randomForest";
+import { gbm } from "../model/gbm";
+import { scaleGamma, svmFit } from "../model/svm";
 
-/** モデル: 上位 k 個（罰則なし）か、LASSO（λ を内側の交差検証で選ぶ）。 */
-export type ModelSpec = { kind: "topk" } | { kind: "lasso"; nLambda: number; rule: LambdaRule };
+/**
+ * モデル: 上位 k 個（罰則なし）、LASSO（λ を内側の交差検証で選ぶ）、または二値だけの
+ * ランダムフォレスト・SVM（RBF）・勾配ブースティング（ハイパーパラメータを候補の格子から内側の交差検証で選ぶ）。
+ * 後の 3 つは、使える特徴量をすべて使う（特徴量の選択はしない）。
+ */
+export type ModelSpec =
+  | { kind: "topk" }
+  | { kind: "lasso"; nLambda: number; rule: LambdaRule }
+  | { kind: "rf"; trees: number; mtry: (number | "sqrt")[] }
+  | { kind: "svm"; C: number[]; gamma: (number | "scale")[] }
+  | { kind: "gbm"; stages: number[]; depth: number[]; learningRate: number; subsample: number };
+
+export type MlSpec = Extract<ModelSpec, { kind: "rf" | "svm" | "gbm" }>;
+/** 格子の 1 点。値は利用者が入れたままの形（"sqrt"・"scale" を含む）。 */
+export type Hyper = Record<string, number | string>;
+
+export const isMl = (m: ModelSpec | undefined): m is MlSpec => m?.kind === "rf" || m?.kind === "svm" || m?.kind === "gbm";
+
+/** 格子（入れた順。前の候補ほど外側の並び）。 */
+export function gridOf(m: MlSpec): Hyper[] {
+  if (m.kind === "rf") return m.mtry.map((v) => ({ trees: m.trees, mtry: v }));
+  if (m.kind === "svm") return m.C.flatMap((C) => m.gamma.map((gamma) => ({ C, gamma })));
+  return m.stages.flatMap((stages) => m.depth.map((depth) => ({ stages, depth, learningRate: m.learningRate, subsample: m.subsample })));
+}
+
+/** 格子の記録用の文字列（例: "C=[0.1,1] gamma=[scale]"）。 */
+export function gridText(m: MlSpec): string {
+  if (m.kind === "rf") return `trees=${m.trees} mtry=[${m.mtry.join(",")}]`;
+  if (m.kind === "svm") return `C=[${m.C.join(",")}] gamma=[${m.gamma.join(",")}]`;
+  return `stages=[${m.stages.join(",")}] depth=[${m.depth.join(",")}] learningRate=${m.learningRate} subsample=${m.subsample}`;
+}
+
+export const hyperText = (h: Hyper | null) => (h ? Object.entries(h).map(([k, v]) => `${k}=${v}`).join(", ") : "");
 
 /** 最小の λ ÷ λmax（glmnet の既定と同じ: 行数が列数より多ければ 1e-4、そうでなければ 1e-2）。 */
 export const lassoRatioFor = (nRows: number, nCols: number) => (nRows > nCols ? 1e-4 : 1e-2);
@@ -61,6 +95,12 @@ export interface Trained {
   medians: (number | null)[];
   means: number[];
   sds: number[];
+  /** 予測の種類。SVM は決定値で、確率ではない（較正は該当しない）。省略は確率（二値）かリスク（生存）。 */
+  output?: "probability" | "decision";
+  /** cols の並びの重要度（ランダムフォレスト・勾配ブースティング）。 */
+  importance?: number[];
+  /** 実際に使った値（"sqrt"・"scale" を数に直したもの）。 */
+  resolved?: Hyper;
 }
 
 const subSurv = (s: Surv, ix: number[]): Surv => ({ time: ix.map((i) => s.time[i]), event: ix.map((i) => s.event[i]) });
@@ -113,10 +153,12 @@ export function scoreRows(task: Task, rows: number[], pred: (number | null)[]): 
 }
 
 export interface InnerChoice {
-  /** 選んだ k（LASSO では係数が 0 でない特徴量の数）。どの候補も評価できなければ null。 */
+  /** 選んだ k（LASSO では係数が 0 でない特徴量の数、RF・SVM・GBM では使った特徴量の数）。どの候補も評価できなければ null。 */
   k: number | null;
   /** LASSO で選んだ λ（上位 k なら null）。 */
   lambda: number | null;
+  /** RF・SVM・GBM で選んだ格子の点（それ以外は省略）。 */
+  params?: Hyper | null;
   /** 候補ごとの内側の評価（kCandidates の並び）。 */
   scores: (number | null)[];
   /** 訓練の行（渡した並び）ごとの内側の分割番号。 */
@@ -180,6 +222,67 @@ export function fitLassoOn(X: (number | null)[][], task: Task, T: number[], spec
   };
 }
 
+/**
+ * RF・SVM・GBM を、訓練の行 train で当てはめる（二値だけ）。使う列は imp.usable の全部。
+ * SVM だけ、訓練の行の平均・SD で標準化し、γ の "scale" も標準化した訓練の行から求める。
+ */
+export function fitMl(imp: Imputed, task: Task, train: number[], h: Hyper, kind: MlSpec["kind"], rng: Rng): Trained | { error: string } {
+  if (task.kind !== "binary") return { error: "ランダムフォレスト・SVM・勾配ブースティングは二値の結果だけです" };
+  const cols = imp.usable.map((u, j) => (u ? j : -1)).filter((j) => j >= 0);
+  if (!cols.length) return { error: "使える特徴量がありません" };
+  const y = task.y;
+  if (!train.some((i) => y[i] === 1) || !train.some((i) => y[i] === 0)) return { error: "訓練の行に片方のクラスしかありません" };
+  const okRow = (i: number) => cols.every((j) => Number.isFinite(imp.X[i][j]));
+  const base = { cols, medians: imp.medians };
+  try {
+    if (kind === "svm") {
+      const st = fitStandardizer(imp.X, train, cols);
+      if ("error" in st) return st;
+      const Z = train.map((i) => standardizeRow(st, imp.X[i]) as number[]);
+      const gamma = h.gamma === "scale" ? scaleGamma(Z) : (h.gamma as number);
+      const m = svmFit(Z, train.map((i) => y[i]), { C: h.C as number, gamma });
+      if (!m.converged) return { error: "SVM が反復の上限までに収束しませんでした" };
+      return { ...base, means: st.means, sds: st.sds, output: "decision", resolved: { C: h.C, gamma }, predict: (i) => { const z = standardizeRow(st, imp.X[i]); return z ? m.decision(z) : null; } };
+    }
+    const nan = { means: cols.map(() => NaN), sds: cols.map(() => NaN) };
+    if (kind === "rf") {
+      const mtry = h.mtry === "sqrt" ? sqrtMtry(cols.length) : (h.mtry as number);
+      if (mtry > cols.length) return { error: `mtry（${mtry}）が使える特徴量の数（${cols.length}）を超えています` };
+      const f = randomForest(imp.X, y, train, cols, { trees: h.trees as number, mtry }, rng);
+      return { ...base, ...nan, importance: f.importance, resolved: { trees: h.trees, mtry }, predict: (i) => (okRow(i) ? f.predict(imp.X[i]) : null) };
+    }
+    const g = gbm(imp.X, y, train, cols, { stages: h.stages as number, maxDepth: h.depth as number, learningRate: h.learningRate as number, subsample: h.subsample as number }, rng);
+    return { ...base, ...nan, importance: g.importance, resolved: { ...h }, predict: (i) => (okRow(i) ? g.predict(imp.X[i]) : null) };
+  } catch (e) {
+    if (e instanceof RangeError) return { error: e.message };
+    throw e;
+  }
+}
+
+/** 訓練の行 T の中で、内側の交差検証（層化しない）により格子の点を選ぶ。基準は内側の予測を束ねた AUC、同じ値なら格子の前の点。 */
+export function chooseHyper(X: (number | null)[][], task: Task, T: number[], spec: NestedCvSpec, model: MlSpec, rng: Rng): InnerChoice {
+  const folds = stratifiedFolds(T.length, null, spec.innerK, rng);
+  const grid = gridOf(model);
+  const pooled: (number | null)[][] = grid.map(() => new Array<number | null>(T.length).fill(null));
+  for (let f = 0; f < spec.innerK; f++) {
+    const tin = T.filter((_, p) => folds[p] !== f), pos = T.map((_, p) => p).filter((p) => folds[p] === f);
+    const imp = imputeByTrain(X, tin, spec.impute);
+    grid.forEach((h, a) => {
+      const m = fitMl(imp, task, tin, h, model.kind, rng);
+      if ("error" in m) return;
+      pos.forEach((p) => { pooled[a][p] = m.predict(T[p]); });
+    });
+  }
+  // 束ねた AUC は、内側のどこかで当てはめに失敗した点（予測が欠けた行がある点）を評価しない
+  const scores = grid.map((_, a) => (pooled[a].some((v) => v === null) ? null : scoreRows(task, T, pooled[a])));
+  let best: number | null = null;
+  scores.forEach((s, a) => {
+    if (s === null) return;
+    if (best === null || s > (scores[best] as number) + 1e-12) best = a;
+  });
+  return { k: null, lambda: null, params: best === null ? null : grid[best], scores, folds };
+}
+
 export interface OuterFold {
   repeat: number;
   fold: number;
@@ -188,6 +291,8 @@ export interface OuterFold {
   k: number | null;
   /** LASSO で選んだ λ（上位 k なら null）。 */
   lambda: number | null;
+  /** RF・SVM・GBM で選んだ格子の点。 */
+  params: Hyper | null;
   innerScores: (number | null)[];
   /** 実際に使った列。 */
   cols: number[];
@@ -212,13 +317,38 @@ export interface NestedCvResult {
   selectionCounts: number[];
 }
 
+const posInt = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 1;
+const dup = (v: unknown[]) => new Set(v.map(String)).size !== v.length;
+
+export function validateMl(m: MlSpec): string | null {
+  if (m.kind === "rf") {
+    if (!posInt(m.trees) || m.trees > 100000) return "木の数は 1 以上 100000 以下の整数にしてください";
+    if (!m.mtry.length || m.mtry.some((v) => v !== "sqrt" && !posInt(v))) return "mtry の候補は 1 以上の整数か sqrt で 1 つ以上入れてください";
+    if (dup(m.mtry)) return "mtry の候補が重複しています";
+  } else if (m.kind === "svm") {
+    if (!m.C.length || m.C.some((v) => !(typeof v === "number" && v > 0 && Number.isFinite(v)))) return "C の候補は正の数で 1 つ以上入れてください";
+    if (!m.gamma.length || m.gamma.some((v) => v !== "scale" && !(typeof v === "number" && v > 0 && Number.isFinite(v)))) return "γ の候補は正の数か scale で 1 つ以上入れてください";
+    if (dup(m.C) || dup(m.gamma)) return "C か γ の候補が重複しています";
+  } else {
+    if (!m.stages.length || m.stages.some((v) => !posInt(v) || v > 100000)) return "段数の候補は 1 以上の整数で 1 つ以上入れてください";
+    if (!m.depth.length || m.depth.some((v) => !posInt(v) || v > 64)) return "木の深さの候補は 1 以上 64 以下の整数で 1 つ以上入れてください";
+    if (dup(m.stages) || dup(m.depth)) return "段数か深さの候補が重複しています";
+    if (!(m.learningRate > 0 && m.learningRate <= 1)) return "学習率は 0 より大きく 1 以下にしてください";
+    if (!(m.subsample > 0 && m.subsample <= 1)) return "subsample は 0 より大きく 1 以下にしてください";
+  }
+  return null;
+}
+
 export function validateSpec(spec: NestedCvSpec, nDev: number): string | null {
   const int = (v: number) => Number.isInteger(v);
   if (!int(spec.outerK) || spec.outerK < 2 || spec.outerK > nDev) return `外側の分割数は 2 以上 ${nDev} 以下の整数にしてください`;
   const minTrain = nDev - Math.ceil(nDev / spec.outerK);
   if (!int(spec.innerK) || spec.innerK < 2 || spec.innerK > minTrain) return `内側の分割数は 2 以上 ${minTrain} 以下の整数にしてください（外側の訓練の行の最小の人数）`;
   if (!int(spec.repeats) || spec.repeats < 1 || spec.repeats > 100) return "反復回数は 1 以上 100 以下の整数にしてください";
-  if (spec.model?.kind === "lasso") {
+  if (isMl(spec.model)) {
+    const bad = validateMl(spec.model);
+    if (bad) return bad;
+  } else if (spec.model?.kind === "lasso") {
     if (!int(spec.model.nLambda) || spec.model.nLambda < 2 || spec.model.nLambda > 1000) return "λ の点の数は 2 以上 1000 以下の整数にしてください";
     if (spec.model.rule !== "min" && spec.model.rule !== "1se") return "λ の選び方は min か 1se です";
   } else {
@@ -247,8 +377,28 @@ export async function nestedCv(X: (number | null)[][], task: Task, dev: number[]
       await tick?.("nested-cv", (r * spec.outerK + f) / total);
       const T = dev.filter((_, p) => assign[p] !== f), pos = dev.map((_, p) => p).filter((p) => assign[p] === f);
       const V = pos.map((p) => dev[p]);
+      if (isMl(spec.model)) {
+        const ch = chooseHyper(X, task, T, spec, spec.model, rng);
+        inner.push(ch.folds);
+        const row: OuterFold = { repeat: r, fold: f, nTrain: T.length, nTest: V.length, k: null, lambda: null, params: ch.params ?? null, innerScores: ch.scores, cols: [], score: null, error: null };
+        if (!ch.params) row.error = "内側の交差検証で、どの候補も評価できませんでした";
+        else {
+          const mdl = fitMl(imputeByTrain(X, T, spec.impute), task, T, ch.params, spec.model.kind, rng);
+          if ("error" in mdl) row.error = mdl.error;
+          else {
+            row.cols = mdl.cols;
+            row.k = mdl.cols.length;
+            for (const j of mdl.cols) counts[j]++;
+            const v = V.map((i) => mdl.predict(i));
+            pos.forEach((p, q) => { pr[p] = v[q]; });
+            row.score = scoreRows(task, V, v);
+          }
+        }
+        folds.push(row);
+        continue;
+      }
       if (spec.model?.kind === "lasso") {
-        const row: OuterFold = { repeat: r, fold: f, nTrain: T.length, nTest: V.length, k: null, lambda: null, innerScores: [], cols: [], score: null, error: null };
+        const row: OuterFold = { repeat: r, fold: f, nTrain: T.length, nTest: V.length, k: null, lambda: null, params: null, innerScores: [], cols: [], score: null, error: null };
         const fit = fitLassoOn(X, task, T, spec, spec.model, rng);
         if ("error" in fit) { row.error = fit.error; inner.push([]); }
         else {
@@ -266,7 +416,7 @@ export async function nestedCv(X: (number | null)[][], task: Task, dev: number[]
       }
       const ch = chooseK(X, task, T, spec, rng, fixed);
       inner.push(ch.folds);
-      const row: OuterFold = { repeat: r, fold: f, nTrain: T.length, nTest: V.length, k: ch.k, lambda: null, innerScores: ch.scores, cols: [], score: null, error: null };
+      const row: OuterFold = { repeat: r, fold: f, nTrain: T.length, nTest: V.length, k: ch.k, lambda: null, params: null, innerScores: ch.scores, cols: [], score: null, error: null };
       if (ch.k === null) row.error = "内側の交差検証で、どの候補も評価できませんでした";
       else {
         const imp = imputeByTrain(X, T, spec.impute);
@@ -309,6 +459,13 @@ export interface FinalModel {
  * 入れ子の交差検証の推定値は「この手順全体」の性能で、このモデルそのものの性能ではない。
  */
 export function finalModel(X: (number | null)[][], task: Task, dev: number[], spec: NestedCvSpec, rng: Rng): FinalModel {
+  if (isMl(spec.model)) {
+    const choice = chooseHyper(X, task, dev, spec, spec.model, rng);
+    if (!choice.params) return { choice, model: null, error: "交差検証で、どの候補も評価できませんでした" };
+    const mdl = fitMl(imputeByTrain(X, dev, spec.impute), task, dev, choice.params, spec.model.kind, rng);
+    if ("error" in mdl) return { choice, model: null, error: mdl.error };
+    return { choice: { ...choice, k: mdl.cols.length }, model: mdl, error: null };
+  }
   if (spec.model?.kind === "lasso") {
     const fit = fitLassoOn(X, task, dev, spec, spec.model, rng);
     if ("error" in fit) return { choice: { k: null, lambda: null, scores: [], folds: [] }, model: null, error: fit.error };
