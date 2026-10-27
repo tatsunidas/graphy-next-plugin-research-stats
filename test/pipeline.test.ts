@@ -5,6 +5,7 @@ import { stratifiedFolds, stratifiedHoldout } from "../src/core/pipeline/split";
 import { qcFeatures, spearman } from "../src/core/pipeline/qc";
 import { fitStandardizer, imputeByTrain } from "../src/core/pipeline/preprocess";
 import { finalModel, nestedCv, validateSpec, type NestedCvSpec, type Task } from "../src/core/pipeline/nestedCv";
+import { lassoAt, zRow } from "../src/core/model/lasso";
 
 const close = (a: number | null, b: number | null, rel: number, abs = 0) => {
   if (b === null) { expect(a).toBeNull(); return; }
@@ -175,5 +176,96 @@ describe("detector: random labels and random features", () => {
     expect(validateSpec({ ...base, kCandidates: [] }, 30)).not.toBeNull();
     expect(validateSpec({ ...base, kCandidates: [2, 2] }, 30)).not.toBeNull();
     expect(validateSpec({ ...base, repeats: 0 }, 30)).not.toBeNull();
+  });
+});
+
+describe("nested cross-validation with LASSO", () => {
+  const spec = (y: number[] | null, rule: "min" | "1se" = "min"): NestedCvSpec => ({ outerK: 5, innerK: 5, repeats: 1, kCandidates: [], strata: y, impute: false, model: { kind: "lasso", nLambda: 30, rule } });
+  const mean = (v: number[]) => v.reduce((a, b) => a + b, 0) / v.length;
+  it("binary: nested AUC is near 0.5 on random data", async () => {
+    const auc: number[] = [];
+    for (const seed of [1, 2, 3, 4]) {
+      const { X, y } = noise(seed, 60, 400);
+      const r = await nestedCv(X, { kind: "binary", y }, X.map((_, i) => i), spec(y), new Rng(seed));
+      expect(r.folds.every((f) => f.error === null && f.lambda !== null)).toBe(true);
+      auc.push(r.pooled[0]!);
+    }
+    expect(Math.abs(mean(auc) - 0.5)).toBeLessThan(0.1);
+  }, 120000);
+  it("survival: nested C-index is near 0.5 on random data", async () => {
+    const cs: number[] = [];
+    for (const seed of [11, 12, 13]) {
+      const { X } = noise(seed, 80, 100);
+      const rng = new Rng(seed + 100);
+      const time = X.map(() => -Math.log(1 - rng.next())), event = X.map(() => (rng.next() < 0.7 ? 1 : 0));
+      const r = await nestedCv(X, { kind: "survival", surv: { time, event } }, X.map((_, i) => i), spec(null), new Rng(seed));
+      cs.push(r.summary.mean!);
+    }
+    expect(Math.abs(mean(cs) - 0.5)).toBeLessThan(0.1);
+  }, 120000);
+  it("positive control: the signal feature is chosen in every fold and AUC is high", async () => {
+    const { X } = noise(5, 60, 50), e = noise(55, 60, 1).X;
+    const y = X.map((r, i) => (r[7] + 0.8 * e[i][0] > 0 ? 1 : 0));
+    const r = await nestedCv(X, { kind: "binary", y }, X.map((_, i) => i), spec(y, "1se"), new Rng(5));
+    expect(r.pooled[0]!).toBeGreaterThan(0.75);
+    expect(r.selectionCounts[7]).toBe(5);
+    const fm = finalModel(X, { kind: "binary", y }, X.map((_, i) => i), spec(y, "1se"), new Rng(5));
+    expect(fm.error).toBeNull();
+    expect(fm.choice.lambda).toBeGreaterThan(0);
+    expect(fm.model!.cols).toContain(7);
+    expect(fm.model!.predict(0)).toBeGreaterThan(0);
+  }, 60000);
+  it("test rows are never used", async () => {
+    const { X, y } = noise(6, 70, 30);
+    const dev = X.map((_, i) => i).filter((i) => i % 7 !== 0);
+    const s = spec(dev.map((i) => y[i]));
+    const a = await nestedCv(X, { kind: "binary", y }, dev, s, new Rng(6));
+    const X2 = X.map((r, i) => (i % 7 === 0 ? r.map((v) => v * 100 + 3) : r)), y2 = y.map((v, i) => (i % 7 === 0 ? 1 - v : v));
+    const b = await nestedCv(X2, { kind: "binary", y: y2 }, dev, s, new Rng(6));
+    expect(b.folds).toEqual(a.folds);
+    expect(b.pred).toEqual(a.pred);
+  }, 60000);
+  it("rejects bad LASSO settings but does not need k candidates", () => {
+    const base: NestedCvSpec = { outerK: 5, innerK: 4, repeats: 1, kCandidates: [], strata: null, impute: false, model: { kind: "lasso", nLambda: 20, rule: "min" } };
+    expect(validateSpec(base, 30)).toBeNull();
+    expect(validateSpec({ ...base, model: { kind: "lasso", nLambda: 1, rule: "min" } }, 30)).not.toBeNull();
+  });
+});
+
+describe("nested cross-validation with LASSO: preprocessing and predictions", () => {
+  const spec = (impute: boolean): NestedCvSpec => ({ outerK: 4, innerK: 4, repeats: 1, kCandidates: [], strata: null, impute, model: { kind: "lasso", nLambda: 20, rule: "min" } });
+  /** 尺度と位置をずらした特徴量（標準化しないと予測が変わるように）。 */
+  function scaled(seed: number, n: number, m: number) {
+    const { X } = noise(seed, n, m), e = noise(seed + 50, n, 1).X;
+    const y = X.map((r, i) => (r[0] - 0.8 * r[1] + 0.7 * e[i][0] > 0 ? 1 : 0));
+    const Xs = X.map((r) => r.map((v, j) => v * (1 + 7 * j) + 3 * j - 5));
+    return { X: Xs as (number | null)[][], y };
+  }
+  it("with imputation, the medians come from the training rows only (test rows changed: same result)", async () => {
+    const { X, y } = scaled(31, 80, 8);
+    X.forEach((r, i) => { if (i % 5 === 0) r[2] = null; });
+    const dev = X.map((_, i) => i).filter((i) => i % 4 !== 0);
+    const a = await nestedCv(X, { kind: "binary", y }, dev, spec(true), new Rng(31));
+    const X2 = X.map((r, i) => (i % 4 === 0 ? r.map((v) => (v === null ? null : v * 50 + 100)) : [...r]));
+    const b = await nestedCv(X2, { kind: "binary", y }, dev, spec(true), new Rng(31));
+    expect(b.folds).toEqual(a.folds);
+    expect(b.pred).toEqual(a.pred);
+    const fa = finalModel(X, { kind: "binary", y }, dev, spec(true), new Rng(3));
+    const fb = finalModel(X2, { kind: "binary", y }, dev, spec(true), new Rng(3));
+    expect(fb.model!.medians).toEqual(fa.model!.medians);
+  }, 60000);
+  it("final-model predictions equal an independent calculation from lassoAt on the original scale", () => {
+    const { X, y } = scaled(32, 90, 6);
+    const dev = X.map((_, i) => i);
+    const fm = finalModel(X, { kind: "binary", y }, dev, spec(false), new Rng(4));
+    if (!fm.model) throw new Error(fm.error ?? "no model");
+    const Xn = X as number[][];
+    const ref = lassoAt({ kind: "binary", y }, Xn, dev, Xn[0].map((_, j) => j), fm.choice.lambda!);
+    if ("error" in ref) throw new Error(ref.error);
+    for (const i of [0, 7, 33, 89]) {
+      const z = zRow(ref.std, Xn[i]);
+      const e = z.reduce((s, v, j) => s + v * ref.coef.beta[j], ref.coef.b0);
+      expect(Math.abs((fm.model.predict(i) as number) - 1 / (1 + Math.exp(-e)))).toBeLessThan(1e-6);
+    }
   });
 });

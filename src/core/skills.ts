@@ -462,7 +462,8 @@ export const P4_PIPELINE: Skill = {
         const pooled = cv.pooled.filter((x): x is number => x !== null);
         return {
           summary: {
-            outerK: st.spec!.outerK, innerK: st.spec!.innerK, repeats: st.spec!.repeats, kCandidates: st.params.kCandidates.join(","),
+            outerK: st.spec!.outerK, innerK: st.spec!.innerK, repeats: st.spec!.repeats, model: st.params.model, kCandidates: st.params.kCandidates.join(","),
+            lassoRule: st.params.lassoRule, lassoNLambda: st.params.model === "lasso" ? st.params.lassoNLambda : null,
             mean: fmt(cv.summary.mean), min: fmt(cv.summary.min), max: fmt(cv.summary.max), valid: cv.summary.valid, total: cv.summary.total,
             pooledMean: pooled.length ? fmt(pooled.reduce((a, b) => a + b, 0) / pooled.length) : null,
           },
@@ -477,8 +478,12 @@ export const P4_PIPELINE: Skill = {
         const st = ctx.state.p4 as P4State;
         const fm = finalModel(st.X, st.cohort.task, st.qc!.dev, st.spec!, ctx.rng);
         st.final = fm;
-        if (fm.error) return { summary: { k: fm.choice.k }, warnings: [`最終モデルを作れませんでした: ${fm.error}`] };
-        return { summary: { k: fm.choice.k, features: fm.model!.cols.map((j) => st.names[j]).join(" + ") }, warnings: [] };
+        if (fm.error) return { summary: { k: fm.choice.k, lambda: fm.choice.lambda }, warnings: [`最終モデルを作れませんでした: ${fm.error}`] };
+        const none = fm.model!.cols.length === 0;
+        return {
+          summary: { k: fm.choice.k, lambda: fm.choice.lambda, features: fm.model!.cols.map((j) => st.names[j]).join(" + ") },
+          warnings: none ? ["選んだ λ では係数がすべて 0 です（特徴量を使わないモデル。予測はどの症例でも同じ値になります）"] : [],
+        };
       },
     },
     {

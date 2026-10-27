@@ -148,7 +148,7 @@ describe("P4 pipeline skill", () => {
     expect(ja).toMatch(/入れ子の交差検証/);
     expect(ja).toMatch(/信頼区間は付けない/);
     expect(en).toMatch(/nested cross-validation/);
-    expect(p4FoldsCsv(st).split(/\r?\n/)[0]).toBe("repeat,fold,n_train,n_test,k,features,score,error");
+    expect(p4FoldsCsv(st).split(/\r?\n/)[0]).toBe("repeat,fold,n_train,n_test,k,lambda,features,score,error");
     expect(p4PredictionsCsv(st).split(/\r?\n/).length).toBe(st.qc!.dev.length + 2);
     // 特徴量の数（40）が症例数（30）より多いときは警告する
     const r2 = new Rng(12);
@@ -159,4 +159,27 @@ describe("P4 pipeline skill", () => {
     const w = await run(wide, { ...binary, lockMode: "none", outerK: 3, innerK: 2, kCandidates: "1" });
     expect(w.record.steps.find((s) => s.id === "p4-qc")!.warnings.join()).toMatch(/特徴量の数（40）が開発集合の症例数（30）より多く/);
   });
+
+  it("LASSO model: needs the λ rule, not k candidates, and goes through to the test set", async () => {
+    const d = synth(120, 21);
+    const lasso = { ...binary, kCandidates: null, model: "lasso", lassoNLambda: 30 };
+    expect(lastError(await run(d, { ...lasso, lockMode: "none" }))).toMatch(/λ の選び方/);
+    const c = await run(d, { ...lasso, lassoRule: "1se", lockMode: "create", testFraction: 0.25 });
+    expect(c.record.status).toBe("ok");
+    const st = c.state.p4 as P4State;
+    expect(st.cv!.folds.every((f) => f.lambda !== null && f.lambda > 0)).toBe(true);
+    expect(st.cv!.pooled[0]!).toBeGreaterThan(0.7);
+    expect(st.final!.choice.lambda).toBeGreaterThan(0);
+    expect(st.final!.model!.cols.map((j) => st.names[j]).some((n) => n === "f_a" || n === "f_dup")).toBe(true);
+    const ja = methodText(c.record, P4_PIPELINE, "ja"), en = methodText(c.record, P4_PIPELINE, "en");
+    expect(ja).toMatch(/L1 罰則つきロジスティック回帰（LASSO、切片は罰則なし）/);
+    expect(ja).toMatch(/1SE 規則/);
+    expect(ja).toMatch(/最終モデルは、開発集合全体での交差検証で λ を選び（λ = /);
+    expect(en).toMatch(/LASSO; intercept not penalised/);
+    const e = await run({ ...d, lock: { name: "l", text: JSON.stringify(st.split!.lock) } }, { ...lasso, lassoRule: "1se", lockMode: "use", evaluateTest: true });
+    expect(e.record.status).toBe("ok");
+    const t = (e.state.p4 as P4State).test!;
+    expect(t.value!).toBeGreaterThan(0.6);
+    expect(t.lock.evaluations[0].summary).toHaveProperty("lambda");
+  }, 120000);
 });
