@@ -6,7 +6,10 @@ import { runRecipe, type RunRecord } from "../core/engine";
 import { kmPointsCsv, r1ResultsCsv } from "../core/exportR1";
 import { methodText } from "../core/methodText";
 import type { Locale, ParamValue, Recipe } from "../core/recipe";
-import { DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, type R1State, type R2State, type R3State } from "../core/recipes";
+import { DATASET_CHECK, P4_PIPELINE, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, type P4State, type R1State, type R2State, type R3State } from "../core/recipes";
+import { P4_DEFAULTS } from "../core/p4";
+import { p4FoldsCsv, p4PredictionsCsv, p4QcCsv, p4SelectionCsv } from "../core/exportP4";
+import { p4Panel } from "./p4View";
 import { R3_DEFAULTS } from "../core/r3";
 import { blandAltmanCsv, exclusionCsv, r3ResultsCsv } from "../core/exportR3";
 import { blandAltmanFor } from "../core/r3";
@@ -29,6 +32,9 @@ interface State {
   clinical: TableSource | null;
   baseline: TableSource[];
   followup: TableSource[];
+  /** P4: 品質管理で除く特徴量の一覧と、テスト集合の固定ファイル。 */
+  exclusion: TableSource | null;
+  lock: { name: string; text: string } | null;
   errors: string[]; // ファイルの読み込みエラー
   params: Record<string, ParamValue>;
   seed: number;
@@ -38,7 +44,7 @@ interface State {
   cancelled: boolean;
   selectedFeature: string | null;
   ba: BaChoice;
-  result: { record: RunRecord; dataset: Dataset | null; report: JoinReport | null; r1: R1State | null; r2: R2State | null; r3: R3State | null } | null;
+  result: { record: RunRecord; dataset: Dataset | null; report: JoinReport | null; r1: R1State | null; r2: R2State | null; r3: R3State | null; p4: P4State | null } | null;
 }
 
 async function readSource(file: File): Promise<TableSource> {
@@ -50,13 +56,13 @@ async function readSource(file: File): Promise<TableSource> {
 /** 研究統計のウィンドウの中身を組み立てる。 */
 export function mountWizard(root: HTMLElement, locale: Locale): void {
   const t = makeT(locale);
-  const s: State = { features: [], clinical: null, baseline: [], followup: [], errors: [], params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS, ...R3_DEFAULTS }, seed: 1, noSha: false, recipe: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, ba: { feature: null, a: 0, b: 1 }, result: null };
+  const s: State = { features: [], clinical: null, baseline: [], followup: [], exclusion: null, lock: null, errors: [], params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS, ...R3_DEFAULTS, ...P4_DEFAULTS }, seed: 1, noSha: false, recipe: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, ba: { feature: null, a: 0, b: 1 }, result: null };
   root.replaceChildren();
   const wrap = h("div", { class: "rs-root", "data-testid": "rs-root" });
   root.append(h("style", {}, CSS), wrap);
 
   const render = () => {
-    const isR3 = s.recipe.id === R3_REPRODUCIBILITY.id;
+    const isR3 = s.recipe.id === R3_REPRODUCIBILITY.id, isP4 = s.recipe.id === P4_PIPELINE.id;
     const canRun = isR3 ? s.features.length >= 2 : !!(s.features.length && s.clinical);
     const items: (Node | null)[] = [
       h("div", { class: "rs-banner", "data-testid": "rs-banner" }, t("banner")),
@@ -65,6 +71,13 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       isR3 ? null : fileRow("rs-file-clinical", t("clinFile"), false, async (fs) => { s.clinical = (await load(fs))[0] ?? null; }),
       isR3 ? null : fileRow("rs-file-baseline", t("baseFiles"), true, async (fs) => { s.baseline = await load(fs); }),
       isR3 ? null : fileRow("rs-file-followup", t("followFiles"), true, async (fs) => { s.followup = await load(fs); }),
+      isP4 ? fileRow("rs-file-exclusion", t("exclFile"), false, async (fs) => { s.exclusion = (await load(fs))[0] ?? null; }) : null,
+      isP4 && s.params.lockMode === "use" ? fileRow("rs-file-lock", t("lockFile"), false, async (fs) => {
+        const f = fs[0];
+        s.lock = f ? { name: f.name, text: await f.text() } : null;
+        s.result = null;
+      }, ".json,application/json") : null,
+      isP4 && s.lock && s.params.lockMode === "use" ? h("div", { class: "rs-note", "data-testid": "rs-lock-loaded" }, s.lock.name) : null,
       ...s.errors.map((e) => h("div", { class: "rs-err", "data-testid": "rs-read-error" }, e)),
       ...loadedNotes(),
       s.noSha ? h("div", { class: "rs-note" }, t("sha")) : null,
@@ -76,7 +89,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         h("input", { type: "number", min: 0, step: 1, value: s.seed, "data-testid": "rs-seed", onchange: (e: Event) => { s.seed = Math.max(0, Math.floor(Number((e.target as HTMLInputElement).value) || 0)); } }),
       ),
       h("div", { class: "rs-row" },
-        h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: !canRun || s.progress !== null, onclick: run }, s.recipe.id === DATASET_CHECK.id ? t("run") : t("runR1")),
+        h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: !canRun || s.progress !== null, onclick: () => run(false) }, s.recipe.id === DATASET_CHECK.id ? t("run") : t("runR1")),
         s.progress !== null ? h("button", { "data-testid": "rs-cancel", onclick: () => { s.cancelled = true; } }, t("cancel")) : null,
         !canRun ? h("span", { class: "rs-note" }, t("pickFirst")) : null,
       ),
@@ -112,15 +125,15 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     [...s.features, ...(s.clinical ? [s.clinical] : []), ...s.baseline, ...s.followup].map((x) =>
       h("div", { class: "rs-note", "data-testid": "rs-loaded" }, t("loaded", { name: x.name, rows: x.table.rows.length, cols: x.table.header.length })));
 
-  function fileRow(testId: string, label: string, multiple: boolean, onFiles: (fs: File[]) => Promise<void>): HTMLElement {
+  function fileRow(testId: string, label: string, multiple: boolean, onFiles: (fs: File[]) => Promise<void>, accept = ".csv,text/csv"): HTMLElement {
     return h("div", { class: "rs-row" },
       h("label", {}, label),
       h("input", {
-        type: "file", accept: ".csv,text/csv", multiple, "data-testid": testId,
+        type: "file", accept, multiple, "data-testid": testId,
         onchange: async (e: Event) => {
           const fs = Array.from((e.target as HTMLInputElement).files ?? []);
           await onFiles(fs);
-          applySuggestions();
+          if (accept.includes(".csv") && testId !== "rs-file-exclusion") applySuggestions();
           render();
         },
       }),
@@ -252,14 +265,55 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     return [h("div", { class: "rs-row" }, h("label", {}, t("minCategory")), el)];
   }
 
+  function p4Controls(): HTMLElement[] {
+    const p = s.params;
+    const choice = (testId: string, label: string, key: string, options: [string, string][], toValue: (v: string) => ParamValue = (v) => v) => {
+      const el = h("select", { "data-testid": testId, onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; s.params = { ...s.params, [key]: v === "" ? null : toValue(v) }; s.result = null; render(); } },
+        h("option", { value: "" }, t("choose")), ...options.map(([v, l]) => h("option", { value: v }, l)));
+      el.value = p[key] === null || p[key] === undefined ? "" : String(p[key]);
+      return h("div", { class: "rs-row" }, h("label", {}, label), el);
+    };
+    const out: (HTMLElement | null)[] = [
+      choice("rs-p4-kind", t("p4Kind"), "outcomeKind", [["binary", t("kBinary")], ["survival", t("kSurvival")]]),
+    ];
+    if (p.outcomeKind === "binary") {
+      const labels = outcomeValues();
+      const pos = h("select", { "data-testid": "rs-positive", onchange: (e: Event) => { s.params = { ...s.params, positiveLabel: (e.target as HTMLSelectElement).value || null }; s.result = null; } },
+        h("option", { value: "" }, t("positiveNone")), ...labels.map((l) => h("option", { value: l }, l)));
+      pos.value = typeof p.positiveLabel === "string" && labels.includes(p.positiveLabel) ? p.positiveLabel : "";
+      out.push(h("div", { class: "rs-row" }, h("label", {}, t("positiveLabel")), pos));
+    }
+    if (p.outcomeKind === "survival") {
+      out.push(choice("rs-p4-strat", t("p4Strat"), "stratifySurvival", [["true", t("stratYes")], ["false", t("stratNo")]], (v) => v === "true"));
+      out.push(numberRow("rs-p4-boot", t("p4Boot"), "testBootstrapB", { step: 100, min: 100 }));
+    }
+    out.push(
+      choice("rs-p4-lock", t("p4Lock"), "lockMode", [["create", t("lockCreate")], ["use", t("lockUse")], ["none", t("lockNone")]]),
+      p.lockMode === "create" ? numberRow("rs-p4-frac", t("p4Frac"), "testFraction", { step: 0.05, min: 0.05, max: 0.95, emptyIsNull: true }) : null,
+      numberRow("rs-p4-outer", t("p4Outer"), "outerK", { step: 1, min: 2, emptyIsNull: true }),
+      numberRow("rs-p4-inner", t("p4Inner"), "innerK", { step: 1, min: 2, emptyIsNull: true }),
+      numberRow("rs-p4-repeats", t("p4Repeats"), "repeats", { step: 1, min: 1, max: 100, emptyIsNull: true }),
+      h("div", { class: "rs-row" }, h("label", {}, t("p4K")), h("input", {
+        type: "text", value: typeof p.kCandidates === "string" ? p.kCandidates : "", placeholder: "1, 2, 4", "data-testid": "rs-p4-k",
+        onchange: (e: Event) => { const v = (e.target as HTMLInputElement).value.trim(); s.params = { ...s.params, kCandidates: v === "" ? null : v }; s.result = null; },
+      })),
+      h("div", { class: "rs-note", "data-testid": "rs-p4-examples" }, t("p4Examples")),
+      h("div", { class: "rs-row" }, h("label", {}, t("p4Const")), h("input", { type: "checkbox", checked: p.dropConstant === true, "data-testid": "rs-p4-const", onchange: (e: Event) => { s.params = { ...s.params, dropConstant: (e.target as HTMLInputElement).checked }; s.result = null; } })),
+      numberRow("rs-p4-corr", t("p4Corr"), "correlationThreshold", { step: 0.01, min: 0.5, max: 1, emptyIsNull: true }),
+      choice("rs-p4-missing", t("p4Missing"), "missing", [["complete", t("mComplete")], ["impute", t("mImpute")]]),
+    );
+    return out.filter((x): x is HTMLElement => x !== null);
+  }
+
   function recipeControls(): HTMLElement {
     const p = s.params;
-    const pick = (id: string) => { s.recipe = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY].find((r) => r.id === id) ?? DATASET_CHECK; s.result = null; s.selectedFeature = null; render(); };
+    const pick = (id: string) => { s.recipe = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE].find((r) => r.id === id) ?? DATASET_CHECK; s.result = null; s.selectedFeature = null; render(); };
     const sel = h("select", { "data-testid": "rs-recipe", onchange: (e: Event) => pick((e.target as HTMLSelectElement).value) },
-      h("option", { value: DATASET_CHECK.id }, t("recipeCheck")), h("option", { value: R1_PROGNOSIS.id }, t("recipeR1")), h("option", { value: R2_DISCRIMINATION.id }, t("recipeR2")), h("option", { value: R3_REPRODUCIBILITY.id }, t("recipeR3")));
+      h("option", { value: DATASET_CHECK.id }, t("recipeCheck")), h("option", { value: R1_PROGNOSIS.id }, t("recipeR1")), h("option", { value: R2_DISCRIMINATION.id }, t("recipeR2")), h("option", { value: R3_REPRODUCIBILITY.id }, t("recipeR3")), h("option", { value: P4_PIPELINE.id }, t("recipeP4")));
     sel.value = s.recipe.id;
     const out: Node[] = [h("div", { class: "rs-row" }, h("label", {}, t("recipe")), sel)];
     if (s.recipe.id === R3_REPRODUCIBILITY.id) return h("div", {}, ...out, ...r3Controls());
+    if (s.recipe.id === P4_PIPELINE.id) return h("div", {}, ...out, ...p4Controls());
     if (s.recipe.id === R2_DISCRIMINATION.id) return h("div", {}, ...out, ...r2Controls());
     if (s.recipe.id !== R1_PROGNOSIS.id) return h("div", {}, ...out);
     const choice = (testId: string, label: string, key: string, options: [string, string][]) => {
@@ -286,12 +340,14 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     return h("div", {}, ...out.filter((x) => x !== null));
   }
 
-  async function run() {
+  async function run(evaluate = false) {
     const needsClinical = s.recipe.id !== R3_REPRODUCIBILITY.id;
+    const isP4 = s.recipe.id === P4_PIPELINE.id;
     if ((needsClinical && !s.clinical) || !s.features.length || s.progress !== null) return;
     const recipe = s.recipe;
     const params: Record<string, ParamValue> = { ...s.params };
     for (const k of Object.keys(params)) if (!(k in recipe.defaults)) delete params[k];
+    if (isP4) params.evaluateTest = evaluate;
     s.cancelled = false;
     s.progress = { label: "", fraction: 0 };
     s.result = null;
@@ -299,7 +355,10 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     try {
       const { record, state } = await runRecipe(
         recipe,
-        { features: s.features, clinical: needsClinical ? (s.clinical ?? undefined) : undefined, baseline: s.baseline, followup: s.followup },
+        {
+          features: s.features, clinical: needsClinical ? (s.clinical ?? undefined) : undefined, baseline: s.baseline, followup: s.followup,
+          exclusion: isP4 ? (s.exclusion ?? undefined) : undefined, lock: isP4 && s.params.lockMode === "use" ? (s.lock ?? undefined) : undefined,
+        },
         params,
         {
           seed: s.seed, pluginVersion: VERSION, now: () => new Date().toISOString(),
@@ -310,8 +369,14 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       const r1 = (state.r1 as R1State | undefined) ?? null;
       const r2 = (state.r2 as R2State | undefined) ?? null;
       const r3 = (state.r3 as R3State | undefined) ?? null;
+      const p4 = (state.p4 as P4State | undefined) ?? null;
       s.selectedFeature = null;
-      s.result = { record, dataset: (state.dataset as Dataset | undefined) ?? null, report: (state.report as JoinReport | undefined) ?? null, r1, r2, r3 };
+      s.result = { record, dataset: (state.dataset as Dataset | undefined) ?? null, report: (state.report as JoinReport | undefined) ?? null, r1, r2, r3, p4 };
+      // 評価したら、回数を 1 増やした固定ファイルを今の固定ファイルにして保存する（次の評価は 2 回目として数える）
+      if (p4?.test) {
+        s.lock = { name: s.lock?.name ?? "research-stats-test-lock.json", text: `${JSON.stringify(p4.test.lock, null, 2)}\n` };
+        download(s.lock.text, "research-stats-test-lock.json", "application/json");
+      }
     } catch (e) {
       s.errors.push(String(e instanceof Error ? e.message : e));
     }
@@ -352,6 +417,12 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
           : h("div", { class: "rs-note", "data-testid": "rs-no-missing" }, t("noMissing")),
         list(t("exclusions"), rep.exclusions.map((x) => `${x.id}: ${x.reason}`), "rs-exclusions"),
       ) : null,
+      r.p4 ? p4Panel(r.p4, t) : null,
+      r.p4 && r.p4.final?.model && r.p4.params.lockMode === "use" && !r.p4.test && r.record.status === "ok"
+        ? h("div", { "data-testid": "rs-p4-eval-box" },
+          h("button", { class: "rs-primary", "data-testid": "rs-p4-evaluate", disabled: s.progress !== null, onclick: () => run(true) }, t("p4Evaluate")),
+          h("div", { class: "rs-note" }, t("p4EvaluateNote")))
+        : null,
       r.r3 && r.r3.rows.length ? r3Panel(r.r3, t, s.ba, (c) => { s.ba = c; render(); }) : null,
       r.r2 && r.r2.rows.length ? r2Panel(r.r2, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
       r.r1 && r.r1.rows.length ? r1Panel(r.r1, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
@@ -368,6 +439,11 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
           const res = blandAltmanFor(d, f, a, b);
           if (!("error" in res)) download(blandAltmanCsv(res, f, d.conditions[a], d.conditions[b]), "research-stats-r3-bland-altman.csv", "text/csv;charset=utf-8");
         } }, t("saveBa")) : null,
+        r.p4?.split?.lock ? h("button", { "data-testid": "rs-save-lock", onclick: () => download(`${JSON.stringify(r.p4!.test?.lock ?? r.p4!.split!.lock, null, 2)}\n`, "research-stats-test-lock.json", "application/json") }, t("saveLock")) : null,
+        r.p4?.cv ? h("button", { "data-testid": "rs-save-p4-folds", onclick: () => download(p4FoldsCsv(r.p4!), "research-stats-p4-folds.csv", "text/csv;charset=utf-8") }, t("saveP4Folds")) : null,
+        r.p4?.cv ? h("button", { "data-testid": "rs-save-p4-pred", onclick: () => download(p4PredictionsCsv(r.p4!), "research-stats-p4-predictions.csv", "text/csv;charset=utf-8") }, t("saveP4Pred")) : null,
+        r.p4?.cv ? h("button", { "data-testid": "rs-save-p4-sel", onclick: () => download(p4SelectionCsv(r.p4!), "research-stats-p4-selection.csv", "text/csv;charset=utf-8") }, t("saveP4Sel")) : null,
+        r.p4?.qc ? h("button", { "data-testid": "rs-save-p4-qc", onclick: () => download(p4QcCsv(r.p4!), "research-stats-p4-qc.csv", "text/csv;charset=utf-8") }, t("saveP4Qc")) : null,
         r.r2 && r.r2.rows.length ? h("button", { "data-testid": "rs-save-r2-results", onclick: () => download(r2ResultsCsv(r.r2!.rows), "research-stats-r2-results.csv", "text/csv;charset=utf-8") }, t("saveR2Results")) : null,
         r.r2?.combo && r.r2.combo.rocLoo.length ? h("button", { "data-testid": "rs-save-curves", onclick: () => download(r2CurvesCsv(r.r2!.combo!), "research-stats-r2-curves.csv", "text/csv;charset=utf-8") }, t("saveCurves")) : null,
         r.r2?.tree ? h("button", { "data-testid": "rs-save-tree", onclick: () => download(treeCsv(r.r2!.tree!.root, r.r2!.context.names), "research-stats-r2-tree.csv", "text/csv;charset=utf-8") }, t("saveTree")) : null,

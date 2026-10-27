@@ -7,7 +7,7 @@ export const CSS = `
 .rs-banner{background:var(--warn-bg);color:var(--warn);border:1px solid var(--line);border-radius:6px;padding:5px 9px;font-size:12px}
 .rs-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:4px 0}
 .rs-row>label{min-width:260px;color:var(--muted)}
-.rs-root select,.rs-root input[type=number],.rs-root input[type=file]{max-width:100%;font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:4px;padding:2px 6px}
+.rs-root select,.rs-root input[type=number],.rs-root input[type=text],.rs-root input[type=file]{max-width:100%;font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:4px;padding:2px 6px}
 .rs-root button{font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:6px;padding:4px 12px;cursor:pointer}
 .rs-root button.rs-primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .rs-root button:disabled{opacity:.5;cursor:not-allowed}

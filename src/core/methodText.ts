@@ -84,6 +84,47 @@ function r2Lines(record: RunRecord, locale: Locale): string[] {
   return L;
 }
 
+/** P4（パイプライン）の手順の記録から、解析の方法の文を作る。記録に無い手順は書かない。 */
+function p4Lines(record: RunRecord, locale: Locale): string[] {
+  const get = (id: string) => record.steps.find((x) => x.id === id && x.status === "ok");
+  const co = get("p4-cohort"), sp = get("p4-split"), qc = get("p4-qc"), cv = get("p4-cv"), fin = get("p4-final"), te = get("p4-test");
+  if (!co || !sp || !qc || !cv) return [];
+  const p = record.params, bin = p.outcomeKind === "binary";
+  const num = (v: unknown) => (typeof v === "number" ? (Number.isInteger(v) ? String(v) : v.toFixed(3)) : "?");
+  const strat = bin || p.stratifySurvival === true;
+  const sha = (v: unknown) => (typeof v === "string" ? v.slice(0, 12) : "?");
+  const qcParts = (ja: boolean) => [
+    p.dropConstant ? (ja ? "値が 1 種類しかない特徴量の除外" : "removal of features with a single value") : null,
+    p.correlationThreshold !== null ? (ja ? `|Spearman の ρ| ≥ ${num(p.correlationThreshold)} の組の片方の除外（欠損の少ない方、同じなら列の順が先の方を残す）` : `removal of one feature of each pair with |Spearman's rho| >= ${num(p.correlationThreshold)} (keeping the one with fewer missing values, then the earlier column)`) : null,
+    qc.summary.excludeList !== null ? (ja ? `除外リスト（${qc.summary.excludeList} 個）による除外` : `removal of the features on an exclusion list (${qc.summary.excludeList})`) : null,
+  ].filter(Boolean);
+  const L: string[] = [];
+  if (locale === "ja") {
+    L.push(bin ? `結果ラベル「${p.positiveLabel}」を陽性とし、${co.summary.patients} 人（陽性 ${co.summary.positivesOrEvents} 人）を対象とした。` : `時間とイベントが揃った ${co.summary.patients} 人（イベント ${co.summary.positivesOrEvents} 件）を対象とした。`);
+    if (p.lockMode === "none") L.push("テスト集合は設けず、交差検証による推定だけを示す。");
+    else L.push(`${strat ? (bin ? "結果ラベルで層化した" : "イベントの有無で層化した") : "層化しない"}無作為抽出により ${sp.summary.test} 人をテスト集合とし、欠損の補完・標準化・特徴量の選択・モデルの選択の前に分けて、テスト集合の固定ファイル（SHA-256 ${sha(sp.summary.lockSha256)}）に記録した。残る ${sp.summary.dev} 人を開発集合とした。`);
+    const qp = qcParts(true);
+    L.push(`${qp.length ? `開発集合の値だけを使って、${qp.join("、")}を行い（除いた特徴量 ${qc.summary.removed} 個）、` : ""}${qc.summary.featuresKept} 個の特徴量を用いた（開発集合の症例数 / 特徴量の数 = ${num(qc.summary.ratio)}）。`);
+    if (Number(qc.summary.missingCells) > 0) L.push(p.missing === "impute" ? "欠損は、各訓練分割の中央値で補った（検証・テストの症例には訓練分割の中央値を当てた）。0 では補っていない。" : `欠損のある開発集合の症例 ${qc.summary.droppedDev} 人を除いた（完全症例）。`);
+    L.push(`性能は、外側 ${p.outerK} 分割（${strat ? "層化" : "層化しない"}）× ${p.repeats} 回、内側 ${p.innerK} 分割（層化しない）の入れ子の交差検証で見積もった。各訓練分割の中だけで、特徴量の順位付け（${bin ? "Mann–Whitney 検定の p" : "単変量 Cox モデルの Wald 検定の p"} の小さい順）、標準化、${bin ? "ロジスティック回帰（罰則なし）" : "Cox 比例ハザードモデル（Efron の近似）"}の当てはめを行い、使う特徴量の数を候補 {${String(p.kCandidates)}} から内側の交差検証（${bin ? "予測を束ねた AUC" : "分割ごとの C-index の平均"} が最大、同じなら少ない方）で選んだ。`);
+    L.push(`外側の分割ごとの${bin ? " AUC" : " Harrell の C-index"} は平均 ${num(cv.summary.mean)}（最小 ${num(cv.summary.min)}・最大 ${num(cv.summary.max)}、評価できた分割 ${cv.summary.valid}/${cv.summary.total}）${bin && cv.summary.pooledMean !== null ? `、予測を束ねた AUC は ${num(cv.summary.pooledMean)}（反復の平均）` : ""}であった。交差検証の推定値には信頼区間は付けない（分割の間の相関のため、素朴な区間は狭すぎる）。`);
+    if (fin && fin.summary.features) L.push(`最終モデルは、開発集合全体での交差検証で特徴量の数を選び（${fin.summary.k} 個）、開発集合全体で作り直した（${fin.summary.features}）。入れ子の交差検証の値は、この手順全体の性能の見積もりである。`);
+    if (te) L.push(`テスト集合（${te.summary.n} 人）で最終モデルを評価し、${bin ? `AUC ${num(te.summary.value)}（DeLong 法の 95% 信頼区間 ${num(te.summary.lower)}–${num(te.summary.upper)}）` : `C-index ${num(te.summary.value)}（ブートストラップ ${p.testBootstrapB} 回のパーセンタイル 95% 信頼区間 ${num(te.summary.lower)}–${num(te.summary.upper)}）`}を得た。このテスト集合での評価は ${te.summary.evaluation} 回目である。`);
+  } else {
+    L.push(bin ? `"${p.positiveLabel}" was the positive outcome; ${co.summary.patients} patients (${co.summary.positivesOrEvents} positive) were included.` : `${co.summary.patients} patients with time and event (${co.summary.positivesOrEvents} events) were included.`);
+    if (p.lockMode === "none") L.push("No test set was held out; only cross-validated estimates are reported.");
+    else L.push(`${sp.summary.test} patients were held out as a test set by ${strat ? (bin ? "random sampling stratified by outcome" : "random sampling stratified by event") : "unstratified random sampling"} before any imputation, standardisation, feature selection or model selection, and recorded in a test-set lock file (SHA-256 ${sha(sp.summary.lockSha256)}). The remaining ${sp.summary.dev} patients formed the development set.`);
+    const qp = qcParts(false);
+    L.push(`${qp.length ? `Using the development set only, quality control comprised ${qp.join("; ")} (${qc.summary.removed} features removed); ` : ""}${qc.summary.featuresKept} features were used (development cases / features = ${num(qc.summary.ratio)}).`);
+    if (Number(qc.summary.missingCells) > 0) L.push(p.missing === "impute" ? "Missing values were imputed with the median of each training split (applied to the held-out cases as well); they were not filled with 0." : `${qc.summary.droppedDev} development cases with missing values were excluded (complete cases).`);
+    L.push(`Performance was estimated by nested cross-validation with ${p.outerK} outer folds (${strat ? "stratified" : "not stratified"}) x ${p.repeats} repeat(s) and ${p.innerK} inner folds (not stratified). Within each training split only, features were ranked (${bin ? "Mann-Whitney p value" : "Wald p value of univariable Cox models"}), standardised and ${bin ? "combined by logistic regression (no penalty)" : "combined in a Cox proportional hazards model (Efron's approximation)"}; the number of features was chosen from {${String(p.kCandidates)}} by the inner cross-validation (${bin ? "highest pooled AUC" : "highest mean C-index across folds"}, ties to the smaller number).`);
+    L.push(`The outer-fold ${bin ? "AUC" : "Harrell's C-index"} was ${num(cv.summary.mean)} on average (min ${num(cv.summary.min)}, max ${num(cv.summary.max)}; ${cv.summary.valid}/${cv.summary.total} folds evaluable)${bin && cv.summary.pooledMean !== null ? `; the pooled AUC was ${num(cv.summary.pooledMean)} (mean over repeats)` : ""}. No confidence interval is given for the cross-validated estimate (naive intervals are too narrow because the folds are correlated).`);
+    if (fin && fin.summary.features) L.push(`The final model chose the number of features by cross-validation on the whole development set (${fin.summary.k}) and was refitted on it (${fin.summary.features}). The nested cross-validation estimates the performance of this whole procedure.`);
+    if (te) L.push(`On the test set (${te.summary.n} patients) the final model gave ${bin ? `an AUC of ${num(te.summary.value)} (DeLong 95% CI ${num(te.summary.lower)}-${num(te.summary.upper)})` : `a C-index of ${num(te.summary.value)} (bootstrap percentile 95% CI, ${p.testBootstrapB} resamples, ${num(te.summary.lower)}-${num(te.summary.upper)})`}. This was evaluation number ${te.summary.evaluation} on this test set.`);
+  }
+  return L;
+}
+
 export function methodText(record: RunRecord, recipe: Recipe, locale: Locale): string {
   const join = record.steps.find((s) => s.id === "join");
   const delta = record.steps.find((s) => s.id === "delta" && s.status === "ok");
@@ -100,7 +141,7 @@ export function methodText(record: RunRecord, recipe: Recipe, locale: Locale): s
       if (join.summary.survivalUsable !== null && join.summary.survivalUsable !== undefined) lines.push(`時間とイベントが揃った患者は ${join.summary.survivalUsable} 人であった。`);
       lines.push("欠損は 0 で補わず、欠損のまま扱った（複数病変の平均は欠損を除いて求めた）。");
     }
-    lines.push(...r1Lines(record, "ja"), ...r2Lines(record, "ja"), ...r3Lines(record, "ja"));
+    lines.push(...r1Lines(record, "ja"), ...r2Lines(record, "ja"), ...r3Lines(record, "ja"), ...p4Lines(record, "ja"));
     lines.push(`乱数シード: ${record.seed}。${changed.length ? `既定値から変更した設定: ${changed.join("、")}。` : "設定は既定値のままであった。"}`);
     lines.push("研究用であり、診断・治療の判断に用いない。");
   } else {
@@ -112,7 +153,7 @@ export function methodText(record: RunRecord, recipe: Recipe, locale: Locale): s
       if (join.summary.survivalUsable !== null && join.summary.survivalUsable !== undefined) lines.push(`${join.summary.survivalUsable} patients had both time and event.`);
       lines.push("Missing values were not filled with 0 and were kept missing (the mean over several lesions ignores missing values).");
     }
-    lines.push(...r1Lines(record, "en"), ...r2Lines(record, "en"), ...r3Lines(record, "en"));
+    lines.push(...r1Lines(record, "en"), ...r2Lines(record, "en"), ...r3Lines(record, "en"), ...p4Lines(record, "en"));
     lines.push(`Random seed: ${record.seed}. ${changed.length ? `Settings changed from the defaults: ${changed.join("; ")}.` : "All settings were the defaults."}`);
     lines.push("For research use only; not for diagnostic or treatment decisions.");
   }
