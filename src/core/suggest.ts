@@ -9,6 +9,8 @@ const first = (header: readonly string[], ...patterns: RegExp[]): string | null 
   return null;
 };
 
+const PATIENT = /^(patient|subject)[_ ]?(id|label|code)?$/i;
+
 export interface Suggestion {
   featureId: string;
   patient: string | null;
@@ -22,8 +24,10 @@ export function suggestColumns(features: CsvTable | null, clinical: CsvTable | n
   const fh = features?.header ?? [];
   const ch = clinical?.header ?? [];
   const featureId = first(fh, /^CaseLabel$/i, /^(case|lesion|roi)[_ ]?id$/i) ?? fh[0] ?? "";
-  const patient = first(fh, /^patient[_ ]?(id|label)?$/i, /^subject[_ ]?(id)?$/i);
-  const clinicalId = first(ch, /^CaseLabel$/i, /^patient[_ ]?(id|label)?$/i, /^subject[_ ]?(id)?$/i) ?? ch[0] ?? "";
+  const patient = first(fh, PATIENT);
+  const patientName = patient && patient !== featureId ? patient.toLowerCase() : null;
+  const sameAsPatient = patientName ? ch.find((h) => h.toLowerCase() === patientName) : undefined;
+  const clinicalId = sameAsPatient ?? first(ch, /^CaseLabel$/i, PATIENT) ?? ch[0] ?? "";
   return {
     featureId,
     patient: patient && patient !== featureId ? patient : null,
