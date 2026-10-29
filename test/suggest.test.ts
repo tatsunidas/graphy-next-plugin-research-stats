@@ -19,6 +19,39 @@ describe("suggestColumns", () => {
   });
 });
 
+describe("suggestColumns: patient column", () => {
+  const sug = (f: string, c: string) => suggestColumns(parseCsv(f), parseCsv(c));
+  it("picks SubjectCode of a batch-extraction table, and the same-named clinical column", () => {
+    const r = sug("CaseLabel,SubjectCode,f1\nL1,S1,1\n", "SubjectCode,time,event\nS1,3,1\n");
+    expect([r.featureId, r.patient, r.clinicalId]).toEqual(["CaseLabel", "SubjectCode", "SubjectCode"]);
+  });
+  it("keeps the former defaults", () => {
+    for (const name of ["Patient", "PatientID", "subject_id", "Subject", "patient_label"]) {
+      expect(sug(`CaseLabel,${name},f1\nL1,P1,1\n`, "x\n1\n").patient).toBe(name);
+    }
+  });
+  it("accepts the code spellings", () => {
+    for (const name of ["Subject_Code", "subject code", "Patient Label"]) {
+      expect(sug(`CaseLabel,${name},f1\nL1,P1,1\n`, "x\n1\n").patient).toBe(name);
+    }
+  });
+  it("does not match names that only contain the words (negative)", () => {
+    expect(sug("CaseLabel,SubjectCodeX,xSubjectCode,f1\nL1,a,b,1\n", "x\n1\n").patient).toBeNull();
+  });
+  it("never uses the feature id column as the patient", () => {
+    expect(sug("SubjectCode,f1\nS1,1\n", "SubjectCode\nS1\n")).toMatchObject({ featureId: "SubjectCode", patient: null });
+  });
+  it("prefers the clinical column named like the patient column, ignoring case", () => {
+    const r = sug("CaseLabel,Patient,f1\nL1,P1,1\n", "CaseLabel,patient,time\nL1,P1,3\n");
+    expect(r.clinicalId).toBe("patient");
+  });
+  it("otherwise keeps the former order", () => {
+    expect(sug("CaseLabel,SubjectCode,f1\nL1,S1,1\n", "a,CaseLabel,Patient\n1,L1,P1\n").clinicalId).toBe("CaseLabel");
+    expect(sug("CaseLabel,f1\nL1,1\n", "a,Patient\n1,P1\n").clinicalId).toBe("Patient");
+    expect(sug("CaseLabel,f1\nL1,1\n", "a,b\n1,2\n").clinicalId).toBe("a");
+  });
+});
+
 describe("datasetCsv", () => {
   it("writes one row per patient with empty cells for missing values", () => {
     const r = buildDataset({
