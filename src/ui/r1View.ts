@@ -36,7 +36,7 @@ export function r1Panel(st: R1State, t: T, selected: string | null, onSelect: (n
       ...(opt ? [h("td", {}, fmtP(r.rawOptimalP))] : []),
       ...(st.params.multiplicity === "bh" ? [h("td", { "data-testid": "rs-r1-q" }, fmtP(r.q))] : []),
       h("td", {}, fmtHr(r.hrGroup, r.hrGroupLower, r.hrGroupUpper)), h("td", {}, fmtHr(r.hrPerSd, r.hrPerSdLower, r.hrPerSdUpper)),
-      h("td", {}, r.error ?? "")))),
+      h("td", {}, r.error ?? r.hrGroupNote ?? "")))),
   );
 
   const groups = pick ? kmForFeature(st.context, pick) : null;

@@ -93,3 +93,96 @@ describe("R1 prognosis skill", () => {
     console.log(`optimal, 23 features, n=100, B=1000: ${Date.now() - t0} ms`);
   }, 120000);
 });
+
+/** 特徴量 nf 個（無関係な乱数）。イベントは先頭から数えて ev 件（時間は無関係）。共変量は age と sex。 */
+function plain(n: number, ev: number, nf: number, seed: number, extra?: (i: number, r: Rng) => Record<string, string>) {
+  const r = new Rng(seed);
+  const names = Array.from({ length: nf }, (_, j) => `g${j}`);
+  const extraNames = extra ? Object.keys(extra(0, new Rng(1))) : [];
+  const feat = [["CaseLabel", ...names, ...extraNames].join(",")], clin = ["CaseLabel,time,event,age,sex"];
+  const order = Array.from({ length: n }, (_, i) => i).sort(() => r.next() - 0.5);
+  for (let i = 0; i < n; i++) {
+    const e = extra ? extra(i, r) : {};
+    feat.push([`P${i}`, ...names.map(() => r.next().toFixed(4)), ...extraNames.map((k) => e[k])].join(","));
+    const isEv = order[i] < ev ? 1 : 0;
+    clin.push(`P${i},${(1 + Math.round(r.next() * 500) / 10).toFixed(1)},${isEv},${40 + Math.floor(r.next() * 40)},${i % 2}`);
+  }
+  return { features: [sourceOf("f.csv", feat.join("\n") + "\n", "a".repeat(64))], clinical: sourceOf("c.csv", clin.join("\n") + "\n", null) };
+}
+
+describe("R1: stratification QC and groups without an event", () => {
+  it("a feature that cannot be split into the requested strata is excluded by QC, and counted apart from failures", async () => {
+    const data = plain(60, 20, 3, 5, (i, r) => ({ f_ties: i % 10 < 7 ? "0" : r.next().toFixed(3) }));
+    const { record, state } = await runSkill(R1_PROGNOSIS, data, { ...base, groupMode: "tertile", bootstrapB: 0 }, opts());
+    expect(record.status).toBe("ok");
+    const row = (state.r1 as R1State).rows.find((x) => x.feature === "f_ties")!;
+    expect(row.qcExcluded).toBe(true);
+    expect(row.error).toMatch(/層に分けられません/);
+    expect(row.pUsed).toBeNull();
+    const uni = record.steps.find((s) => s.id === "univariate")!;
+    expect(uni.summary.excluded).toBe(1);
+    expect(uni.summary.failed).toBe(0);
+    // 負例: 普通の特徴量は除外されない
+    expect((state.r1 as R1State).rows.filter((x) => x.feature.startsWith("g") && x.qcExcluded)).toHaveLength(0);
+  });
+  it("a group with no event: the group HR is 'not estimable', the log-rank p stays, and the feature is still selected", async () => {
+    // f_sep: 値が低い三分の一は全員が打ち切り。残りはイベントが多い
+    const n = 90, feat = ["CaseLabel,f_sep,g0"], clin = ["CaseLabel,time,event,age,sex"];
+    const r = new Rng(9);
+    for (let i = 0; i < n; i++) {
+      const v = i / n; // 0..1
+      feat.push(`P${i},${v.toFixed(4)},${r.next().toFixed(4)}`);
+      const ev = v < 1 / 3 ? 0 : (r.next() < 0.8 ? 1 : 0);
+      clin.push(`P${i},${(5 + (1 - v) * 40 + r.next() * 5).toFixed(2)},${ev},${50 + (i % 20)},${i % 2}`);
+    }
+    const data = { features: [sourceOf("f.csv", feat.join("\n") + "\n", "a".repeat(64))], clinical: sourceOf("c.csv", clin.join("\n") + "\n", null) };
+    const { record, state } = await runSkill(R1_PROGNOSIS, data, { ...base, groupMode: "tertile", bootstrapB: 0 }, opts());
+    expect(record.status).toBe("ok");
+    const st = state.r1 as R1State;
+    const row = st.rows.find((x) => x.feature === "f_sep")!;
+    expect(row.groupEvents[0]).toBe(0);
+    expect(row.error).toBeNull();
+    expect(row.hrGroup).toBeNull();
+    expect(row.hrGroupNote).toMatch(/群 1 に死亡なし/);
+    expect(row.logrankP).not.toBeNull();
+    expect(row.q as number).toBeLessThan(0.05);
+    expect(st.model!.screened).toContain("f_sep");
+    expect(st.model!.selected).toContain("f_sep"); // 多変量は連続値（z 化）を使うので、群の HR が無くても入る
+    // 負例: 普通の特徴量には注記が付かない
+    expect(st.rows.find((x) => x.feature === "g0")!.hrGroupNote).toBeNull();
+  });
+});
+
+describe("R1: the multivariable model keeps 10 events per variable and never takes the whole skill down", () => {
+  const loose = { ...base, covariates: ["age", "sex"], multiplicity: "none", alpha: 0.5, bootstrapB: 0, groupMode: "median" };
+  it("15 events, 2 covariates, 34 features, many pass a loose screen: no feature fits in; univariate results are kept; the skill is not failed", async () => {
+    const { record, state } = await runSkill(R1_PROGNOSIS, plain(56, 15, 34, 21), loose, opts());
+    expect(record.status).toBe("ok");
+    const st = state.r1 as R1State;
+    expect(st.rows.filter((x) => x.error === null).length).toBe(34);
+    expect(st.model!.screened.length).toBeGreaterThan(5);
+    expect(st.model!.selected).toHaveLength(0);
+    expect(st.model!.notEntered).toHaveLength(st.model!.screened.length);
+    expect(st.model!.error).toBeNull();
+    expect(st.model!.notes.join(" ")).toMatch(/EPV 10/);
+  });
+  it("30 events, no covariate: at most 3 features enter, the ones with the smallest p, and the bootstrap uses the same cap", async () => {
+    const { record, state } = await runSkill(R1_PROGNOSIS, plain(80, 30, 20, 4), { ...base, multiplicity: "none", alpha: 0.5, bootstrapB: 40, groupMode: "median" }, opts());
+    expect(record.status).toBe("ok");
+    const st = state.r1 as R1State, m = st.model!;
+    expect(m.maxVars).toBe(3);
+    expect(m.selected).toHaveLength(3);
+    const byP = st.rows.filter((x) => m.screened.includes(x.feature)).sort((a, b) => (a.pUsed as number) - (b.pUsed as number)).map((x) => x.feature);
+    expect(m.selected).toEqual(byP.slice(0, 3));
+    expect(m.notEntered).toEqual(byP.slice(3));
+    expect(m.fit).not.toBeNull();
+    expect(m.corrected).not.toBeNull();
+    expect(m.corrected!.failed).toBeLessThan(m.corrected!.bootstraps + m.corrected!.failed); // 上限が無いと大半が失敗する
+  });
+  it("enough events: nothing is held back (no cap note)", async () => {
+    const { state } = await runSkill(R1_PROGNOSIS, synth(120, 11), { ...base, covariates: ["age"], bootstrapB: 0 }, opts());
+    const m = (state.r1 as R1State).model!;
+    expect(m.notEntered).toHaveLength(0);
+    expect(m.notes.join(" ")).not.toMatch(/EPV/);
+  });
+});

@@ -155,6 +155,8 @@ export interface ComboResult {
   loo: { auc: number; lower: number; upper: number } | null;
   looCohort: number;
   looFailed: number;
+  /** LOO で特徴量が 1 つも選ばれず、訓練の陽性割合を予測にした折の数。 */
+  looEmptySelection: number;
   candidates: number;
   selectionCounts: { feature: string; count: number }[];
   rocApparent: RocPoint[];
@@ -175,7 +177,7 @@ function z(xs: number[]) {
 
 export async function combination(ctx: DiscrimContext, rows: FeatureRow[], p: R2Params, tick: (label: string, fraction: number) => Promise<void>): Promise<ComboResult> {
   const out: ComboResult = {
-    features: [], nUsed: 0, positives: 0, terms: [], apparent: null, loo: null, looCohort: 0, looFailed: 0, candidates: 0, selectionCounts: [],
+    features: [], nUsed: 0, positives: 0, terms: [], apparent: null, loo: null, looCohort: 0, looFailed: 0, looEmptySelection: 0, candidates: 0, selectionCounts: [],
     rocApparent: [], rocLoo: [], calibration: [], calibrationFit: null, dca: [], looPerformance: null, notes: [], error: null,
   };
   const meets = rows.map((r, j) => ({ r, j })).filter((x) => meetsCriterion(x.r, p)).sort((a, b) => (a.r.mwP as number) - (b.r.mwP as number) || a.j - b.j);
@@ -209,6 +211,8 @@ export async function combination(ctx: DiscrimContext, rows: FeatureRow[], p: R2
   const loo = looTopK(Xc, y, { k: p.topK, alpha: p.multiplicity === "bh" ? p.alpha : null, selectInside: true });
   await tick("LOO", 1);
   out.looFailed = loo.failed;
+  out.looEmptySelection = loo.emptySelection;
+  if (loo.emptySelection) out.notes.push(`LOO の ${cc.length} 折のうち ${loo.emptySelection} 折で特徴量が 1 つも選ばれず、訓練データの陽性割合をそのまま予測にしました。除いた患者が陽性だと訓練側の陽性割合が下がるため、この折が多いと LOO の AUC は 0.5 より低く偏ります`);
   out.selectionCounts = loo.selectionCounts.map((count, a) => ({ feature: ctx.names[candIdx[a]], count })).filter((x) => x.count > 0).sort((a, b) => b.count - a.count);
   const ok = loo.pred.map((v, i) => (v === null ? -1 : i)).filter((i) => i >= 0);
   if (loo.failed) out.notes.push(`LOO のうち ${loo.failed} 折はモデルを作れず、その患者は LOO の評価から除きました`);

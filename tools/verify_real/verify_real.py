@@ -238,23 +238,15 @@ def cox_compare(skill, cid, fit, got_hr, got_lo, got_hi, got_p, why):
     return ok1
 
 
-def strict_c(T_, E_, risk):
-    """Harrell の C（定義どおりの総当たり）。比較可能な組 = i がイベントで T_i < T_j（同時刻の組は数えない）。リスクの同点は 0.5。"""
-    T_ = np.asarray(T_, float); E_ = np.asarray(E_, int); r = np.asarray(risk, float)
-    comp = (E_[:, None] == 1) & (T_[:, None] < T_[None, :])
-    den = comp.sum()
-    if den == 0:
-        return np.nan
-    conc = ((r[:, None] > r[None, :]) & comp).sum() + 0.5 * ((r[:, None] == r[None, :]) & comp).sum()
-    return conc / den
-
-
-def tied_c(T_, E_, risk):
-    """同時刻の「イベント vs 打ち切り」の組も比較可能として数える慣習（lifelines・R の survival::concordance）。"""
+def harrell_c(T_, E_, risk):
+    """Harrell の C（定義どおりの総当たり）。比較可能な組 = i がイベントで、T_i < T_j、または T_i = T_j で j が打ち切り
+    （イベントの方が先とみなす。lifelines の concordance_index と同じ規則）。リスクの同点は 0.5。"""
     T_ = np.asarray(T_, float); E_ = np.asarray(E_, int); r = np.asarray(risk, float)
     comp = (E_[:, None] == 1) & ((T_[:, None] < T_[None, :]) | ((T_[:, None] == T_[None, :]) & (E_[None, :] == 0)))
     np.fill_diagonal(comp, False)
     den = comp.sum()
+    if den == 0:
+        return np.nan
     conc = ((r[:, None] > r[None, :]) & comp).sum() + 0.5 * ((r[:, None] == r[None, :]) & comp).sum()
     return conc / den
 
@@ -426,9 +418,11 @@ def check_r1_mode(rid, mode):
         "lifelines は歪みの強い共変量（z の最大 7）で最大値に届かない。参照側の不具合であり、実装の不具合ではない")
     # 解析できない特徴量の集合: 定数・空の群・（HR を求められない = イベントの無い群）
     err_got = set(res.loc[res["error"].notna(), "feature"])
-    err_ref = set(skipped) | {f for f in ref if ref[f]["sep"]}
-    rec(S, f"{rid}.unanalyzable_set", "PASS" if err_got == err_ref else "FAIL",
-        f"実装={len(err_got)} 参照={len(err_ref)}（定数/空の群 {len(skipped)}、イベントの無い群 {len(err_ref) - len(skipped)}）差={sorted(err_got ^ err_ref)[:5]}", "集合の一致（実装が error にした特徴量 = 定数・空の群・どれかの群にイベントが無い特徴量）")
+    err_ref = set(skipped)
+    hr_got = set(res.loc[res["hr_group_note"].notna(), "feature"])
+    hr_ref = {f for f in ref if ref[f]["sep"] and f not in err_ref}
+    rec(S, f"{rid}.unanalyzable_set", "PASS" if (err_got == err_ref and hr_got == hr_ref) else "FAIL",
+        f"QC の除外 実装={len(err_got)} 参照={len(err_ref)}（定数/空の群）差={sorted(err_got ^ err_ref)[:5]}。群の HR を推定できず記録のみ 実装={len(hr_got)} 参照={len(hr_ref)}（イベントの無い群）差={sorted(hr_got ^ hr_ref)[:5]}", "集合の一致（実装が error にした特徴量 = 定数・空の群・どれかの群にイベントが無い特徴量）")
     nsep = [f for f in ref if ref[f]["sep"]]
     if nsep:
         lrp = [R.loc[f, "logrank_p"] for f in nsep]
@@ -437,11 +431,13 @@ def check_r1_mode(rid, mode):
         rec(S, f"{rid}.separated_features_keep_logrank", "PASS" if ok else "FAIL",
             f"イベントの無い群をもつ特徴量 {len(nsep)} 個（HR は求められず error）でも、log-rank の p は計算され参照と一致（最小 p={min(lrp):.4g}、q<0.05 に入る数={sum(1 for f in nsep if R.loc[f, 'q_bh'] < 0.05) if R['q_bh'].notna().any() else 'q なし'}）",
             "log-rank は群にイベントが無くても定義できる", "", )
-        sel_blocked = [f for f in nsep if pd.notna(R.loc[f, "q_bh"]) and R.loc[f, "q_bh"] < 0.05]
-        if sel_blocked:
-            rec(S, f"{rid}.design.separated_excluded_from_selection", "FAIL",
-                f"q<0.05 なのに error のため選択（多変量・補正 C-index の対象）に入らない特徴量={len(sel_blocked)}: {[f[:30] for f in sel_blocked[:5]]}",
-                "isSelected は error===null を要求する（コードの読みではなく、出力の error 列と q 列から）", "効果が最も強い（群にイベントが無い）特徴量が選択から落ちる。設計上の観察", cause="design")
+        sel_ok = [f for f in nsep if pd.notna(R.loc[f, "q_bh"]) and R.loc[f, "q_bh"] < 0.05]
+        mvm = d["extra"]["r1"]["model"]
+        screened = set(mvm["screened"]) if mvm else set()
+        sel_blocked = [f for f in sel_ok if f not in screened]
+        rec(S, f"{rid}.design.separated_excluded_from_selection", "FAIL" if sel_blocked else "PASS",
+            f"群の HR が推定不能な特徴量のうち q<0.05 のもの={len(sel_ok)}、そのうち選択（多変量・補正 C-index の対象）に入らなかったもの={len(sel_blocked)}: {[f[:30] for f in sel_blocked[:5]]}",
+            "出力の q 列と、実装が「基準を満たした」とした特徴量の一覧から（HR が推定不能でも選択に残す）")
     num = lambda col: [R.loc[f, col] for f in fs]
     compare(S, f"{rid}.n", [ref[f]["n"] for f in fs], num("n"), 0, 0, "整数")
     compare(S, f"{rid}.events", [ref[f]["events"] for f in fs], num("events"), 0, 0, "整数")
@@ -546,7 +542,8 @@ def check_r1_optimal(rid="r1_optimal", minfrac=0.1):
             best[f] = max(cand, key=lambda t: (t[0], -t[1]))
     # TS が解析できなかった特徴量
     err = res[res["error"].notna()]
-    rec(S, f"{rid}.errors", "PASS" if len(err) == 15 else "FAIL", f"実装の解析不能={len(err)}: {err['error'].value_counts().to_dict()}", "（情報）3 個は定数。残りは最小の群の割合で候補なし等の可能性")
+    hrn = res[res["hr_group_note"].notna()]
+    rec(S, f"{rid}.errors", "PASS" if (len(err) + len(hrn) == 15 and (err["qc_excluded"] == 1).all() and len(err) >= 3) else "FAIL", f"実装の解析不能（QC の除外）={len(err)}: {err['error'].value_counts().to_dict()}、群の HR を推定できず記録のみ={len(hrn)}", "（情報）3 個は定数。残りは最小の群の割合で候補なし等の可能性")
     fs = [f for f in best if pd.notna(R.loc[f, "logrank_chi2"])]
     only_ref = [f for f in best if pd.isna(R.loc[f, "logrank_chi2"])]
     rec(S, f"{rid}.analyzable_set", "PASS" if not only_ref else "FAIL", f"参照では候補があるが実装が解析不能={only_ref[:6]}（{len(only_ref)} 個）", "集合の一致")
@@ -566,17 +563,21 @@ def check_r1_optimal(rid="r1_optimal", minfrac=0.1):
         raw_ref = chi2sf(np.array([best[f][0] for f in fs]))
         compare(S, f"{rid}.raw_p", raw_ref, [R.loc[f, "optimal_raw_p"] for f in fs], 1e-12, 1e-8, "最大 χ² の自由度 1 の上側確率（探索の素の p）")
     sepc = 0
-    for f in [f for f in best if not pd.isna(R.loc[f, "logrank_chi2"]) and pd.notna(R.loc[f, "error"])]:
+    for f in [f for f in best if not pd.isna(R.loc[f, "logrank_chi2"]) and pd.notna(R.loc[f, "hr_group_note"])]:
         x = D[f].values.astype(float); ok = ~np.isnan(x)
         gg = x[ok] > best[f][1]
         ge = [int(Em[ok][gg == v].sum()) for v in (0, 1)]
         sepc += int(min(ge) == 0)
-    errd = [f for f in best if pd.notna(R.loc[f, "error"])]
-    rec(S, f"{rid}.separated_features", "PASS" if sepc == len(errd) else "FAIL", f"最適しきい値で error になった特徴量 {len(errd)} 個のうち、そのしきい値の群にイベントが無い（HR が発散する）もの={sepc}", "error の理由が実在する（完全分離）")
-    blocked = [f for f in errd if pd.notna(R.loc[f, "q_bh"]) and R.loc[f, "q_bh"] < d["params"]["alpha"]]
+    errd = [f for f in best if pd.notna(R.loc[f, "hr_group_note"])]
+    rec(S, f"{rid}.separated_features", "PASS" if sepc == len(errd) and len(errd) > 0 else "FAIL", f"最適しきい値で HR が推定不能と記録された特徴量 {len(errd)} 個のうち、そのしきい値の群にイベントが無い（HR が発散する）もの={sepc}", "error の理由が実在する（完全分離）")
+    # 群に死亡が無く HR が出ない特徴量も、q が alpha 未満なら選択に入る（log-rank の p・q は有効）
+    sel_ok = [f for f in errd if pd.notna(R.loc[f, "q_bh"]) and R.loc[f, "q_bh"] < d["params"]["alpha"]]
+    mvm = d["extra"]["r1"]["model"]
+    screened = set(mvm["screened"]) if mvm else set()
+    blocked = [f for f in sel_ok if f not in screened]
     rec(S, f"{rid}.design.separated_excluded_from_selection", "FAIL" if blocked else "PASS",
-        f"最適しきい値で HR が求められず error になった特徴量 {len(errd)} 個のうち、補正 p の q が alpha 未満（本来なら選択に入る）なのに error で外れたもの={len(blocked)} {[f[:30] for f in blocked[:5]]}。実際に選ばれた特徴量={step(d, 'univariate')['summary']['selected']} 個",
-        "error の列と q の列から（error の特徴量は選択に入らない）", "設計上の観察" if blocked else "", cause="design" if blocked else "")
+        f"最適しきい値で HR が推定不能な特徴量 {len(errd)} 個のうち、補正 p の q が alpha 未満のもの={len(sel_ok)}、そのうち選択（多変量の候補）に入らなかったもの={len(blocked)} {[f[:30] for f in blocked[:3]]}",
+        "q の列と、実装の「基準を満たした特徴量」の一覧から（推定不能の特徴量を落とさない）")
     cp = res["optimal_permutation_p"].dropna()
     rp = res.loc[cp.index, "optimal_raw_p"]
     ok_range = bool(((cp >= 1 / 1001 - 1e-12) & (cp <= 1)).all() and (cp >= rp - 1e-12).all())
@@ -630,7 +631,23 @@ def check_r1_multivariate(rid="r1_median_a03", mode="median"):
     q = bh([ps[f] for f in fl])
     sel_ref = [f for f, qq in zip(fl, q) if qq < alpha]
     mv = ex["model"]
-    rec(S, f"{rid}.mv.selected_set", "PASS" if set(sel_ref) == set(mv["selected"]) else "FAIL", f"実装={len(mv['selected'])} 参照={len(sel_ref)}", f"q<{alpha} の特徴量の集合（BH）")
+    covs = list(d["params"].get("covariates") or [])
+    rec(S, f"{rid}.mv.screened_set", "PASS" if set(sel_ref) == set(mv["screened"]) else "FAIL", f"実装={len(mv['screened'])} 参照={len(sel_ref)}", f"q<{alpha} の特徴量の集合（BH）")
+    # 変数の上限（イベント 10 件あたり 1 変数。共変量も数える）: p の小さい順に、入れた特徴量が揃った患者のイベント数で決める
+    order = sorted(sel_ref, key=lambda f: (ps[f], fl.index(f)))
+    k = len(order)
+    while k > 0:
+        okp = ~D[order[:k] + covs].isna().any(axis=1).values
+        if k + len(covs) <= math.floor(Em[okp].sum() / 10):
+            break
+        k -= 1
+    rec(S, f"{rid}.mv.epv_cap_entered", "PASS" if order[:k] == mv["selected"] else "FAIL",
+        f"参照: 基準を満たした {len(order)} 個のうち p の小さい順に {k} 個（イベント {int(Em.sum())} 件、共変量 {len(covs)} 個、上限 {math.floor(Em.sum() / 10)} 変数）を入れる。実装={mv['selected']} 参照={order[:k]}",
+        "入れる特徴量 = p の小さい順の先頭 k 個。k = k + 共変量 ≤ ⌊イベント ÷ 10⌋ を満たす最大の数（参照側で独立に実装）")
+    rec(S, f"{rid}.mv.not_entered", "PASS" if mv["notEntered"] == order[k:] else "FAIL", f"実装={len(mv['notEntered'])} 個 参照={len(order[k:])} 個", "入れなかった特徴量の一覧が、基準を満たしたもの − 入れたもの")
+    if k == 0:
+        rec(S, f"{rid}.mv.no_model_when_no_room", "PASS" if (mv["error"] is None and not mv["terms"]) else "FAIL", f"枠が無いとき多変量モデルを作らず、エラーにもしない: terms={len(mv['terms'])} error={mv['error']}", "")
+        return
     if mv["error"] or not mv["terms"]:
         rec(S, f"{rid}.mv.fit", "FAIL", f"実装が多変量を作れなかった: {mv['error']}", ""); return
     sel = mv["selected"]
@@ -638,32 +655,34 @@ def check_r1_multivariate(rid="r1_median_a03", mode="median"):
     for f in sel:
         x = D[f].values.astype(float)
         cols.append((x - x.mean()) / x.std(ddof=1))
-    X = np.c_[np.array(cols).T, D["Age"].values.astype(float), D["Female"].values.astype(float)]
+    X = np.c_[np.array(cols).T, *[D[c].values.astype(float) for c in covs]] if covs else np.array(cols).T
     fit = efron_cox(X, Tm, Em)
-    names = sel + ["Age", "Female"]
+    names = sel + covs
     t = pd.DataFrame(mv["terms"])
     rec(S, f"{rid}.mv.term_names", "PASS" if list(t["name"]) == names else "FAIL", f"{list(t['name'])}", "項の並び（選ばれた特徴量→共変量）")
     cox_compare(S, f"{rid}.mv", fit, t["hr"].values, t["lower"].values, t["upper"].values, t["p"].values, "多変量 Cox（Efron）。自前の Newton と比べる")
     lp = X @ fit["beta"]
-    c_strict = strict_c(Tm, Em, lp)
+    c_ref = harrell_c(Tm, Em, lp)
     eps = 1e-10 * (abs(fit["ll"]) + 1)
-    compare(S, f"{rid}.mv.cindex_apparent", [c_strict], [mv["cIndexApparent"]], 1e-9, 0.0, "Harrell の C を定義どおり総当たりで数える（比較可能な組 = i がイベントで T_i < T_j。同時刻の組は数えない）")
+    compare(S, f"{rid}.mv.cindex_apparent", [c_ref], [mv["cIndexApparent"]], 1e-9, 0.0, "Harrell の C を定義どおり総当たりで数える（比較可能な組 = i がイベントで T_i < T_j、または同時刻で j が打ち切り。lifelines と同じ規則）")
     c_life = concordance_index(Tm, -lp, Em)
-    compare(S, f"{rid}.mv.cindex_apparent_vs_lifelines", [c_life], [mv["cIndexApparent"]], 1e-9, 0.0, "lifelines の concordance_index",
-            f"自前の総当たりで再現: 同時刻の「イベント vs 打ち切り」の組を比較可能と数える慣習だと {tied_c(Tm, Em, lp):.6f}（lifelines と一致）、数えない慣習だと {c_strict:.6f}（実装と一致）。時間の同点が 3 組あり、比較可能な組の数が 530 と 531 で違う", cause="refdef")
+    compare(S, f"{rid}.mv.cindex_apparent_vs_lifelines", [c_life], [mv["cIndexApparent"]], 1e-9, 0.0, "lifelines の concordance_index")
     compare(S, f"{rid}.mv.loglik", [fit["ll"]], [mv["loglik"]], eps + 1e-12, 0.0, "部分尤度。TS の停止規則（ll の変化 < 1e-10(|ll|+1)）が許す差")
-    fc = efron_cox(X[:, len(sel):], Tm, Em)
-    chi2 = 2 * (fit["ll"] - fc["ll"])
-    p_av = stats.chi2.sf(chi2, len(sel))
-    av = mv["addedValue"]
-    compare(S, f"{rid}.mv.added_value_chi2", [chi2], [av["chi2"]], 4 * eps + 1e-12, 0.0, "−2 log 尤度の差。両モデルの ll の許容の和の 2 倍")
-    compare(S, f"{rid}.mv.added_value_p", [p_av], [av["p"]], 4 * eps * 0.5 + 1e-12, 0.0, "χ² 上側確率（df = 特徴量の数）。|dp/dχ²| ≤ 0.5")
+    if covs:
+        fc = efron_cox(X[:, len(sel):], Tm, Em)
+        chi2 = 2 * (fit["ll"] - fc["ll"])
+        p_av = stats.chi2.sf(chi2, len(sel))
+        av = mv["addedValue"]
+        compare(S, f"{rid}.mv.added_value_chi2", [chi2], [av["chi2"]], 4 * eps + 1e-12, 0.0, "−2 log 尤度の差。両モデルの ll の許容の和の 2 倍")
+        compare(S, f"{rid}.mv.added_value_p", [p_av], [av["p"]], 4 * eps * 0.5 + 1e-12, 0.0, "χ² 上側確率（df = 特徴量の数）。|dp/dχ²| ≤ 0.5")
+    else:
+        rec(S, f"{rid}.mv.added_value_none", "PASS" if mv["addedValue"] is None else "FAIL", f"共変量なし: addedValue={mv['addedValue']}", "共変量が無いときは臨床因子だけのモデルが無いので、足した効果は出さない")
     cc = ex["model"]["corrected"]
     if cc is None:
         rec(S, f"{rid}.mv.corrected_c", "UNMET", "実装が補正 C-index を出していない"); return
     ok_names = [f for f in FEATS if not D[f].isna().any()]
     Xall = np.array([D[f].values.astype(float) for f in ok_names]).T
-    cov = np.c_[D["Age"].values.astype(float), D["Female"].values.astype(float)]
+    cov = np.c_[*[D[c].values.astype(float) for c in covs]] if covs else np.zeros((len(D), 0))
     rng = np.random.default_rng(11)
     B = 500
     def procedure(idx):
@@ -679,11 +698,15 @@ def check_r1_multivariate(rid="r1_median_a03", mode="median"):
             pv.append(chi2sf(logrank_chi2_fast(tt, ee, g)))
         qq = bh(pv)
         sel_i = [j for j in range(len(qq)) if not np.isnan(qq[j]) and qq[j] < alpha]
+        # 本体と同じ規則（独立に実装）: p の小さい順に、標本のイベント数 ÷ 10 − 共変量の数 まで
+        sel_i = sorted(sel_i, key=lambda j: (pv[j], j))[:max(0, math.floor(ee.sum() / 10) - cov.shape[1])]
         cols_ = []
         for j in sel_i:
             x = Xall[idx, j]; sd = x.std(ddof=1)
             if sd > 0: cols_.append((j, x.mean(), sd))
         Xb = np.c_[np.array([(Xall[idx, j] - m) / s_ for j, m, s_ in cols_]).T if cols_ else np.zeros((len(idx), 0)), cov[idx]]
+        if Xb.shape[1] == 0:
+            return lambda rows: np.zeros(len(rows))
         fb = efron_cox(Xb, tt, ee)
         if fb is None:
             return None
@@ -702,10 +725,10 @@ def check_r1_multivariate(rid="r1_median_a03", mode="median"):
         risk = procedure(idx)
         if risk is None:
             fail += 1; continue
-        a = strict_c(Tm[idx], Em[idx], risk(idx)); o = strict_c(Tm, Em, risk(allrows))
+        a = harrell_c(Tm[idx], Em[idx], risk(idx)); o = harrell_c(Tm, Em, risk(allrows))
         opt.append(a - o)
     opt = np.array(opt)
-    ref_corr = c_strict - opt.mean()
+    ref_corr = c_ref - opt.mean()
     se = opt.std(ddof=1) / math.sqrt(len(opt))
     ts_se = se * math.sqrt(len(opt) / max(cc["bootstraps"], 1))
     z = abs(ref_corr - cc["corrected"]) / math.sqrt(se ** 2 + ts_se ** 2)
@@ -722,23 +745,12 @@ def check_r1():
     check_r1_mode("r1_tertile", "tertile")
     d = J("r1_median")
     if d is not None:
-        ms = step(d, "multivariate")
-        rec("R1", "r1_median.mv.default_alpha", "UNMET",
-            f"既定 alpha=0.05 で選ばれた特徴量={step(d, 'univariate')['summary']['selected']} 個、多変量 Cox の状態={ms['status']}: {ms['errors']}",
-            "既定設定では多変量 Cox・補正 C-index の出力が無く、突き合わせる対象が無い（前提待ち）。alpha=0.03 の run で代わりに確かめる。観察: 15 イベントに 36 変数")
-        if out:
-            ref, fs, R, D, Tm, Em = out
-            sel = [f for f in fs if R.loc[f, "q_bh"] < 0.05]
-            cols = [(D[f].values - D[f].mean()) / D[f].std(ddof=1) for f in sel]
-            X = np.c_[np.array(cols).T, D["Age"].values.astype(float), D["Female"].values.astype(float)]
-            fit = efron_cox(X, Tm, Em)
-            if fit is None:
-                rec("R1", "r1_median.mv.default_alpha_reference_fit", "UNMET", "参照の Newton も収束しない（情報行列が特異、または発散）", "実装が止まったことと矛盾しない（参照も数値を返せない）。合否は付けない")
-            else:
-                big = int((np.abs(fit["beta"]) > 10).sum())
-                rec("R1", "r1_median.mv.default_alpha_reference_fit", "UNMET",
-                    f"参照の Newton は数値を返した（|係数|>10 の項 {big}/{len(fit['beta'])}、最大 |係数|={np.abs(fit['beta']).max():.3g}、最大の se={fit['se'].max():.3g}）。実装は「情報行列が特異」として止めた。15 イベントに 36 変数ではイベント数 < 変数の数で、係数は一意に決まらない",
-                    "実装が止まる妥当性は、参照が数値を返すため確認できない（参照の値は識別できない領域のもの）。合否は付けない")
+        ms = step(d, "multivariate"); us = step(d, "univariate")
+        mvm = d["extra"]["r1"]["model"]
+        ok = ms["status"] != "failed" and d["status"] == "ok" and us["summary"]["selected"] > 15 and mvm is not None and not mvm["selected"] and mvm["error"] is None
+        rec("R1", "r1_median.mv.default_alpha", "PASS" if ok else "FAIL",
+            f"既定 alpha=0.05 で選ばれた特徴量={us['summary']['selected']} 個。多変量の状態={ms['status']}、Skill の状態={d['status']}、入れた特徴量={len(mvm['selected']) if mvm else None}、入れなかった={len(mvm['notEntered']) if mvm else None}（イベント 15 件・共変量 2 個）",
+            "変数の上限（⌊15 ÷ 10⌋ = 1 変数）が共変量 2 個で埋まるため、特徴量は入らない。Skill は失敗にならず、特徴量ごとの結果は残る（以前は 36 変数で情報行列が特異になり Skill 全体が失敗した）")
     check_r1_optimal()
     check_r1_multivariate()
 
@@ -1041,12 +1053,12 @@ def fold_values(d, kind, repeat_idx_names):
 
 
 def safe_c(tt, p, ee, life=False):
-    """欠けた予測を除いた C-index。既定は自前の総当たり（同時刻の組は数えない）、life=True は lifelines。"""
+    """欠けた予測を除いた C-index。既定は自前の総当たり（lifelines と同じ規則）、life=True は lifelines。"""
     ok = ~np.isnan(p)
     if ok.sum() < 2 or ee[ok].sum() == 0:
         return np.nan
     if not life:
-        return strict_c(tt[ok], ee[ok], p[ok])
+        return harrell_c(tt[ok], ee[ok], p[ok])
     try:
         return concordance_index(tt[ok], -p[ok], ee[ok])
     except Exception:
@@ -1115,10 +1127,9 @@ def check_p4_run(rid, full=True):
     vals = np.array([o[2] for o in out], dtype=float)
     ts = np.array([o[3] for o in out], dtype=float)
     vlife = np.array([o[8] for o in out], dtype=float)
-    compare(S, f"{rid}.c.fold_score", vals, ts, 1e-9, 1e-9, f"折ごとの {'AUC（sklearn）' if kind=='binary' else 'C-index（自前の総当たり。同時刻の組は数えない）'} を予測 CSV と分割から再計算")
+    compare(S, f"{rid}.c.fold_score", vals, ts, 1e-9, 1e-9, f"折ごとの {'AUC（sklearn）' if kind=='binary' else 'C-index（自前の総当たり。lifelines と同じ規則）'} を予測 CSV と分割から再計算")
     if kind == "survival" and full:
-        compare(S, f"{rid}.c.fold_score_vs_lifelines", vlife, ts, 1e-9, 1e-9, "折ごとの C-index を lifelines の concordance_index で再計算",
-                f"同時刻の「イベント vs 打ち切り」の組を比較可能と数える慣習の違い（自前の総当たりで再現: その慣習の値は lifelines と一致、数えない慣習の値は実装と一致）。折は約 11 例で 1 組の違いが 0.02〜0.05 を動かす", cause="refdef")
+        compare(S, f"{rid}.c.fold_score_vs_lifelines", vlife, ts, 1e-9, 1e-9, "折ごとの C-index を lifelines の concordance_index で再計算")
     errs = folds["error"].dropna()
     if len(errs):
         rec(S, f"{rid}.c.unevaluable_folds", "PASS" if np.isnan(vals[np.isnan(ts)]).all() else "FAIL", f"評価不能の折={len(errs)}: {errs.tolist()[:2]}（参照でも評価不能={int(np.isnan(vals).sum())}）", "実装が評価不能とした折が、参照でも定義できない（片方のクラスだけ等）")
@@ -1305,10 +1316,9 @@ def check_r5_run(rid, kind):
     cox_compare(S, f"{rid}.refit", fit, terms["hr"].values, terms["lower"].values, terms["upper"].values, terms["p"].values, "選ばれた特徴量だけで Cox（Efron）に当て直す。自前の Newton と比べる")
     compare(S, f"{rid}.refit.beta", fit["beta"], terms["beta"].values, cox_tols(fit) + 1e-12, 0.0, "表の beta_per_sd（log HR）。許容は上と同じ（停止規則が許す係数のずれ）")
     lp = Z @ fit["beta"]
-    c_strict = strict_c(Tm, Em, lp)
-    compare(S, f"{rid}.cindex_apparent", [c_strict], [ex["cApparent"]], 1e-9, 0.0, "Harrell の C を定義どおり総当たりで数える（同時刻の組は数えない）")
-    compare(S, f"{rid}.cindex_apparent_vs_lifelines", [concordance_index(Tm, -lp, Em)], [ex["cApparent"]], 1e-9, 0.0, "lifelines の concordance_index",
-            f"同時刻の「イベント vs 打ち切り」の組を数える慣習だと {tied_c(Tm, Em, lp):.6f}（lifelines と一致）、数えない慣習だと {c_strict:.6f}（実装と一致）", cause="refdef")
+    c_ref = harrell_c(Tm, Em, lp)
+    compare(S, f"{rid}.cindex_apparent", [c_ref], [ex["cApparent"]], 1e-9, 0.0, "Harrell の C を定義どおり総当たりで数える（同時刻のイベント vs 打ち切りの組も数える。lifelines と同じ規則）")
+    compare(S, f"{rid}.cindex_apparent_vs_lifelines", [concordance_index(Tm, -lp, Em)], [ex["cApparent"]], 1e-9, 0.0, "lifelines の concordance_index")
     s_ = fit  # 以降の p の参照
     # 後退選択の規則
     rec(S, f"{rid}.backward.p_out", "PASS" if (fit["p"] <= P["r5POut"] + 1e-9).all() else "FAIL", f"最終モデルの Wald の p={np.round(fit['p'], 4).tolist()} 出る p={P['r5POut']}", "残った変数の p ≤ 出る p")
@@ -1367,7 +1377,7 @@ def check_r5_reference_optimism():
         full = proc(allr, T_, E_)
         if full is None:
             continue
-        c_app = strict_c(T_, E_, full(allr))
+        c_app = harrell_c(T_, E_, full(allr))
         opt = []
         for b in range(B):
             idx = rng.integers(0, len(T_), len(T_))
@@ -1376,7 +1386,7 @@ def check_r5_reference_optimism():
             f_ = proc(idx, T_[idx], E_[idx])
             if f_ is None:
                 continue
-            opt.append(strict_c(T_[idx], E_[idx], f_(idx)) - strict_c(T_, E_, f_(allr)))
+            opt.append(harrell_c(T_[idx], E_[idx], f_(idx)) - harrell_c(T_, E_, f_(allr)))
         res.append((c_app, c_app - np.mean(opt)))
     app = np.array([r[0] for r in res]); cor = np.array([r[1] for r in res])
     n_ = len(cor)

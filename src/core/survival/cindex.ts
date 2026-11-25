@@ -1,7 +1,8 @@
 /**
  * Harrell の C-index と、ブートストラップによる楽観の補正（Harrell の方法）。
- * 比較できる組: 時間が短い方がイベント、かつ時間が異なる。リスクが高い方が短い時間なら一致、同点は 0.5。
- * 同じ時間の組は数えない（流儀が分かれるため、ここで決めて記録する）。
+ * 比較できる組: 時間が短い方がイベント。リスクが高い方が短い時間なら一致、同点は 0.5。
+ * 同じ時間の組は、片方がイベント・もう片方が打ち切りなら数える（イベントの方が先とみなす。lifelines の
+ * concordance_index と同じ定義）。同じ時間のイベント同士・打ち切り同士は数えない。
  */
 import type { Rng } from "../rng";
 import type { Surv } from "./types";
@@ -12,7 +13,7 @@ export function cIndex(s: Surv, risk: number[]): number | null {
   for (let i = 0; i < n; i++) {
     if (s.event[i] !== 1) continue;
     for (let j = 0; j < n; j++) {
-      if (s.time[j] <= s.time[i]) continue;
+      if (s.time[j] < s.time[i] || (s.time[j] === s.time[i] && s.event[j] === 1)) continue;
       comp++;
       if (risk[i] > risk[j]) conc++;
       else if (risk[i] === risk[j]) conc += 0.5;

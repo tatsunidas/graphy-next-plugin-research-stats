@@ -5,6 +5,7 @@ TypeScript 側の実装とは独立に書いてあり、test/fixtures/survival.j
 import json, sys
 import numpy as np
 import scipy, scipy.stats as st
+from lifelines.utils import concordance_index
 import statsmodels
 from statsmodels.duration.survfunc import SurvfuncRight, survdiff
 from statsmodels.duration.hazard_regression import PHReg
@@ -25,19 +26,22 @@ def make(seed, n, tie_round):
     return time, ev, x
 
 def cindex_bruteforce(time, ev, risk):
+    # lifelines と同じ定義: 同時刻でもイベント vs 打ち切りの組は数える（イベントが先）。独立の確認のため lifelines も呼ぶ。
     conc = comp = 0.0
     n = len(time)
     for i in range(n):
         if ev[i] != 1:
             continue
         for j in range(n):
-            if time[j] > time[i]:
+            if time[j] > time[i] or (time[j] == time[i] and ev[j] == 0):
                 comp += 1
                 if risk[i] > risk[j]:
                     conc += 1
                 elif risk[i] == risk[j]:
                     conc += 0.5
-    return conc / comp
+    ref = concordance_index(time, -np.asarray(risk), ev)
+    assert abs(conc / comp - ref) < 1e-12, (conc / comp, ref)
+    return ref
 
 cases = []
 for seed, n, rnd in [(1, 60, 1), (2, 100, 2), (3, 45, 1)]:

@@ -264,11 +264,17 @@ export const R1_PROGNOSIS: Skill = {
         }
         st.rows = rows;
         st.comparisons = applyMultiplicity(rows, st.params.multiplicity);
-        const failed = rows.filter((r) => r.error !== null);
+        const excluded = rows.filter((r) => r.error !== null && r.qcExcluded);
+        const failed = rows.filter((r) => r.error !== null && !r.qcExcluded);
+        const hrNone = rows.filter((r) => r.error === null && r.hrGroupNote !== null);
         const selected = rows.filter((r) => isSelected(r, st.params));
         return {
-          summary: { features: m, comparisons: st.comparisons, failed: failed.length, selected: selected.length },
-          warnings: failed.length ? [`${failed.length} 個の特徴量は解析できませんでした（理由は結果の表にあります。p は空欄のままで、0 や 1 にはしていません）`] : [],
+          summary: { features: m, comparisons: st.comparisons, excluded: excluded.length, failed: failed.length, selected: selected.length },
+          warnings: [
+            ...(excluded.length ? [`${excluded.length} 個の特徴量は、指定した群分けで層に分けられない・人数不足のため、解析から除きました（理由は結果の表の「理由」の列にあります）: ${excluded.slice(0, 8).map((r) => `${r.feature}（${r.error}）`).join("、")}${excluded.length > 8 ? ` ほか ${excluded.length - 8} 個` : ""}`] : []),
+            ...(failed.length ? [`${failed.length} 個の特徴量は計算できませんでした（理由は結果の表にあります。p は空欄のままで、0 や 1 にはしていません）`] : []),
+            ...(hrNone.length ? [`${hrNone.length} 個の特徴量は、群の HR を推定できませんでした（群に死亡が無いなど）。log-rank の p・q は有効で、選択の対象に残しています`] : []),
+          ],
         };
       },
     },
@@ -279,10 +285,11 @@ export const R1_PROGNOSIS: Skill = {
         const st = ctx.state.r1 as R1State;
         const mv = await multivariate(st.context, st.rows, st.covariates, st.params, ctx.rng, ctx.tick);
         st.model = mv;
-        if (mv.error) return { summary: {}, warnings: mv.notes, errors: [mv.error] };
+        // 多変量が作れなくても、特徴量ごとの結果は有効。Skill 全体を失敗にせず、理由を警告に出す
+        if (mv.error) return { summary: { screened: mv.screened.length, selected: mv.selected.length }, warnings: [mv.error, ...mv.notes], skipped: true };
         return {
           summary: {
-            selected: mv.selected.length, nUsed: mv.nUsed, eventsUsed: mv.eventsUsed,
+            screened: mv.screened.length, selected: mv.selected.length, notEntered: mv.notEntered.length, maxVars: mv.maxVars, nUsed: mv.nUsed, eventsUsed: mv.eventsUsed,
             cIndexApparent: mv.cIndexApparent, cIndexCorrected: mv.corrected?.corrected ?? null,
             optimism: mv.corrected?.optimism ?? null, bootstraps: mv.corrected?.bootstraps ?? null,
             addedValueP: mv.addedValue?.p ?? null,
@@ -383,7 +390,7 @@ export const R2_DISCRIMINATION: Skill = {
         st.combo = c;
         if (c.error) return { summary: {}, warnings: c.notes, errors: [c.error] };
         return {
-          summary: { features: c.features.join(" + "), nUsed: c.nUsed, apparentAuc: c.apparent?.auc ?? null, looAuc: c.loo?.auc ?? null, looCohort: c.looCohort, looFailed: c.looFailed },
+          summary: { features: c.features.join(" + "), nUsed: c.nUsed, apparentAuc: c.apparent?.auc ?? null, looAuc: c.loo?.auc ?? null, looCohort: c.looCohort, looFailed: c.looFailed, looEmptySelection: c.looEmptySelection },
           warnings: c.notes, skipped: c.features.length === 0,
         };
       },

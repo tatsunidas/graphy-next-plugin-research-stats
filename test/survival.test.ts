@@ -74,6 +74,24 @@ describe("log-rank vs statsmodels survdiff", () => {
   });
 });
 
+describe("C-index tie rule (lifelines concordance_index の値)", () => {
+  const ci = (t: number[], e: number[], r: number[]) => cIndex({ time: t, event: e }, r);
+  it("same time: event vs censored is counted, the event comes first", () => {
+    expect(ci([3, 3], [1, 0], [2, 1])).toBe(1);
+    expect(ci([3, 3], [1, 0], [1, 2])).toBe(0);
+    expect(ci([3, 3, 3], [1, 0, 0], [3, 2, 1])).toBe(1);
+  });
+  it("same time: event vs event and censored vs censored are not counted (no comparable pair)", () => {
+    expect(ci([3, 3], [1, 1], [2, 1])).toBeNull();
+    expect(ci([3, 3], [0, 0], [2, 1])).toBeNull();
+  });
+  it("tied risk counts 0.5; a censored earlier time makes no pair; mixed example", () => {
+    expect(ci([2, 5], [1, 0], [1, 1])).toBe(0.5);
+    expect(ci([2, 5], [0, 1], [1, 2])).toBeNull();
+    expect(ci([1, 3, 3, 4], [1, 1, 0, 1], [4, 2, 3, 1])).toBeCloseTo(0.8, 12);
+  });
+});
+
 describe("Cox (Efron) vs statsmodels PHReg", () => {
   it("univariate and multivariate coefficients, SE, log-likelihoods, C-index", () => {
     for (const c of fx.cases) {

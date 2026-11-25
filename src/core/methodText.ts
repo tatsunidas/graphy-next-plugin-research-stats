@@ -25,7 +25,9 @@ function r1Lines(record: RunRecord, locale: Locale): string[] {
     if (gm === "optimal") L.push(`最適しきい値は各群が全体の ${num(p.minGroupFraction)} 以上になる候補から選び、探索による p の過小評価を補うため、時間とイベントの組を並べ替える検定（${p.permutations} 回）で補正した p を用いた。`);
     L.push(bh ? `${uni.summary.comparisons} 個の比較を Benjamini–Hochberg 法で補正し、q < ${num(p.alpha)} を有意とした。` : `多重比較の補正をしない（探索的な解析）。p < ${num(p.alpha)} を目安とした。`);
     if (mv) {
-      L.push(`基準を満たした ${mv.summary.selected} 個の特徴量${(record.steps.find((s) => s.id === "cohort")?.summary.covariates ?? 0) ? "と臨床因子" : ""}で多変量 Cox モデルを当てはめた（完全症例 ${mv.summary.nUsed} 人、イベント ${mv.summary.eventsUsed} 件）。`);
+      const hasCov = (record.steps.find((s) => s.id === "cohort")?.summary.covariates ?? 0) as number;
+      const capped = Number(mv.summary.notEntered) > 0;
+      L.push(`基準を満たした ${mv.summary.screened ?? mv.summary.selected} 個の特徴量${capped ? `のうち、変数 1 個あたりイベント 10 件（EPV 10。Peduzzi ら 1996）を保つ上限（共変量を含め ${mv.summary.maxVars} 変数）に収まる ${mv.summary.selected} 個を p の小さい順に選び、${hasCov ? "臨床因子とともに" : ""}` : hasCov ? "と臨床因子で" : "で"}多変量 Cox モデルを当てはめた（完全症例 ${mv.summary.nUsed} 人、イベント ${mv.summary.eventsUsed} 件）。`);
       if (mv.summary.cIndexApparent !== null) L.push(`C-index は見かけ ${num(mv.summary.cIndexApparent)}${mv.summary.cIndexCorrected !== null ? `、ブートストラップ（${mv.summary.bootstraps} 回、特徴量の選択も毎回やり直す）で楽観を補正して ${num(mv.summary.cIndexCorrected)}` : ""}。`);
       if (mv.summary.addedValueP !== null) L.push(`臨床因子に特徴量を加えた効果は −2 log 尤度の差（尤度比検定）で p = ${num(mv.summary.addedValueP)}。`);
     }
@@ -34,7 +36,8 @@ function r1Lines(record: RunRecord, locale: Locale): string[] {
     if (gm === "optimal") L.push(`The cut-off was chosen among candidates leaving at least ${num(p.minGroupFraction)} of the patients in each group, and the p value was corrected for the search by a permutation test (${p.permutations} permutations of the time-event pairs).`);
     L.push(bh ? `${uni.summary.comparisons} comparisons were corrected with the Benjamini–Hochberg procedure (q < ${num(p.alpha)}).` : `No correction for multiple comparisons was applied (exploratory analysis); p < ${num(p.alpha)} was used as a guide.`);
     if (mv) {
-      L.push(`A multivariable Cox model was fitted with the ${mv.summary.selected} selected feature(s)${(cohort?.summary.covariates ?? 0) ? " and the clinical covariates" : ""} (complete cases ${mv.summary.nUsed}, ${mv.summary.eventsUsed} events).`);
+      const capEn = Number(mv.summary.notEntered) > 0 ? ` (of ${mv.summary.screened} meeting the criterion, entered in order of p value up to ${mv.summary.maxVars} variables including covariates, i.e. 10 events per variable; Peduzzi et al. 1996)` : "";
+      L.push(`A multivariable Cox model was fitted with the ${mv.summary.selected} selected feature(s)${capEn}${(cohort?.summary.covariates ?? 0) ? " and the clinical covariates" : ""} (complete cases ${mv.summary.nUsed}, ${mv.summary.eventsUsed} events).`);
       if (mv.summary.cIndexApparent !== null) L.push(`The apparent C-index was ${num(mv.summary.cIndexApparent)}${mv.summary.cIndexCorrected !== null ? `; the optimism-corrected C-index (bootstrap, ${mv.summary.bootstraps} resamples, with the feature selection repeated in each) was ${num(mv.summary.cIndexCorrected)}` : ""}.`);
       if (mv.summary.addedValueP !== null) L.push(`The added value of the features over the clinical covariates was tested by the difference in −2 log likelihood (p = ${num(mv.summary.addedValueP)}).`);
     }

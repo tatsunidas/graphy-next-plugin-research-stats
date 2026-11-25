@@ -146,6 +146,21 @@ describe("LOO with selection inside the fold", () => {
     expect(r.selectionCounts.every((n) => n === 0)).toBe(true);
     expect(selectTopK(c.X, c.y, c.y.map((_, i) => i), 2, null).length).toBe(2);
   });
+  it("counts the folds with no selection: all folds, none, and a mixed case against an independent recount", () => {
+    const c = fx.cases[0], n = c.y.length;
+    expect(looTopK(c.X, c.y, { k: 2, alpha: 1e-12, selectInside: true }).emptySelection).toBe(n);
+    expect(looTopK(c.X, c.y, { k: 2, alpha: null, selectInside: true }).emptySelection).toBe(0);
+    let sawMixed = false;
+    for (const cs of fx.cases) for (const alpha of [0.01, 0.05, 0.2, 0.5]) {
+      const r = looTopK(cs.X, cs.y, { k: 2, alpha, selectInside: true });
+      const all = cs.y.map((_, i) => i);
+      let ref = 0;
+      for (let i = 0; i < cs.y.length; i++) if (!selectTopK(cs.X, cs.y, all.filter((t) => t !== i), 2, alpha).length) ref++;
+      expect(r.emptySelection).toBe(ref);
+      if (ref > 0 && ref < cs.y.length) sawMixed = true;
+    }
+    expect(sawMixed).toBe(true);
+  });
 });
 
 describe("decision tree (the lung-cancer paper's definition)", () => {
