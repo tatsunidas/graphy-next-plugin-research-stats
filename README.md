@@ -105,6 +105,23 @@ radiomics の研究で、特徴量の表と臨床データを結合してデー�
 
 予後・判別・再現性・予測モデルの性能・予後モデル以外のスキル（ランダムフォレストなど）は、今後のバージョンで加えます。
 
+## 前処理の統計部品（`src/core/stats/`。画面・パイプラインへの組み込みは次の段）
+
+外部の統計ライブラリを使わない純関数です。
+
+- 正規性: Shapiro–Wilk（`shapiro.ts`。Royston 1995 の AS R94、3 ≤ n ≤ 5000。全値が同じなら p は null＝計算できない）。
+- 等分散性: Levene（中心 mean）／Brown–Forsythe（中心 median、既定）（`levene.ts`。2 群以上）。
+- 平均の比較: Student・Welch・対応のある t（`ttest.ts`。両側）。順位の比較: Wilcoxon の符号順位（`wilcoxon.ts`）と、既存の Mann–Whitney。
+  - Wilcoxon は scipy の既定（0 差を除く・連続性補正なし・auto）と同じ定義です。0 差もタイも無く組が 50 以下なら正確な分布（`exact`）、0 差かタイがあり 13 組以下なら符号の全割り当て（`permutation`）、それ以外は正規近似（`approx`）で、使った方法と除いた 0 差の数を返します。差がすべて 0 のときは p を計算できない（null）とします（scipy は 1 を返す）。
+- 検定の選び方（`assumptions.ts`。α は引数で、既定値はありません）:
+  - 対応なし 2 群: 各群の Shapiro–Wilk の p が両方とも α 以上（各群 3 個以上）なら「正規」。正規で Levene（median）の p が α 以上なら Student、正規で等分散でない（Levene が計算できない場合を含む）なら Welch、正規でない（検定できない場合を含む）なら Mann–Whitney。
+  - 対応あり: 差の Shapiro–Wilk の p が α 以上（3 組以上）なら対応のある t、そうでなければ Wilcoxon の符号順位。
+  - 戻りに、選んだ検定・統計量・p・前提の検定の結果・理由（日本語・英語）を持ちます。
+- 列の選択（`dropByPValue.ts`）: 列ごとに上の規則で検定し、p が**しきい値以上**または計算できない列を落とします。対応なしは群ごとの行、対応ありは行の組を渡し、渡した行だけを読みます（しきい値・α は引数）。落とした理由は列ごとの記録に残ります。
+- 標準化（`standardize.ts`）: 平均と標本 SD（n − 1）を与えた行だけから推定し、別の行に適用します。SD が 0 の列は適用不可（0 で割らない）。`needsStandardization(model)` は、尺度に敏感なモデル（lasso・svm・logistic・knn）は true、決定木・ランダムフォレスト・勾配ブースティングは false です。
+
+参照値は `tools/gen_preprocess_fixture.py`（scipy の `shapiro`・`levene`・`ttest_ind`・`ttest_rel`・`wilcoxon`・`mannwhitneyu` と、選び方の規則を scipy の関数で書き直したもの）が `test/fixtures/preprocess.json` に出し、`test/preprocess.test.ts` が突き合わせます（固定シードの正規・対数正規・外れ値・タイ・小標本から n = 5000 まで、差が 0 のペア、分散の違う 2 群）。Shapiro–Wilk だけは scipy の数値の近似の精度に合わせて許容を広げています（W 1e-8、p 絶対 1e-7）。
+
 ## 変化率
 
 変化率 = (後 − 前) / |前| × 100（%）。病変ごとに求めて患者で平均する方法（既定）と、患者で平均してから求める方法を選べます。基準値が 0 の値は欠損にします。
