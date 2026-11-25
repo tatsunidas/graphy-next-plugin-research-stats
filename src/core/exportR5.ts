@@ -11,6 +11,7 @@ export function r5ModelCsv(st: R5State): string {
   rows.push(["c_index_apparent", m.cApparent, null, null, null, null, null, null]);
   rows.push(["c_index_corrected", m.corrected?.corrected ?? null, null, null, null, null, null, null]);
   rows.push(["optimism", m.corrected?.optimism ?? null, null, null, null, null, null, null]);
+  rows.push(["c_index_oob", m.corrected?.oob ?? null, null, null, null, null, null, null]);
   return toCsv(["feature", "beta_per_sd", "hr_per_sd", "hr_lower", "hr_upper", "p", "mean", "sd"], rows);
 }
 

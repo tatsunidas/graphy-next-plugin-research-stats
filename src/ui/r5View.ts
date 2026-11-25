@@ -31,7 +31,8 @@ export function r5Panel(st: R5State, t: T): HTMLElement | null {
 
   const cview = h("div", { "data-testid": "rs-r5-c" },
     h("div", { class: "rs-big", "data-testid": "rs-r5-capp" }, t("r5CApp", { a: f3(m.cApparent) })),
-    m.corrected ? h("div", { class: "rs-big", "data-testid": "rs-r5-ccorr" }, t("r5CCorr", { c: f3(m.corrected.corrected), o: f3(m.corrected.optimism), b: m.corrected.bootstraps, f: m.corrected.failed })) : null);
+    m.corrected ? h("div", { class: "rs-big", "data-testid": "rs-r5-ccorr" }, t("r5CCorr", { c: f3(m.corrected.corrected), o: f3(m.corrected.optimism), b: m.corrected.bootstraps, f: m.corrected.failed })) : null,
+    m.corrected && m.corrected.oob !== null ? h("div", { class: "rs-note", "data-testid": "rs-r5-oob" }, t("r5Oob", { v: f3(m.corrected.oob), n: m.corrected.oobN })) : null);
 
   const steps = r.steps.length
     ? h("details", { "data-testid": "rs-r5-steps" }, h("summary", {}, `${t("r5Steps")}（${r.steps.length}）`),

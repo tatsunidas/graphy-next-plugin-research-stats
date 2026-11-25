@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { Rng } from "../src/core/rng";
 import { r5Model, readR5Params, R5_DEFAULTS, type R5Params } from "../src/core/r5";
+import { bootstrapCorrectedC } from "../src/core/survival/cindex";
 
 const normal = (rng: Rng) => Math.sqrt(-2 * Math.log(rng.next() || 1e-12)) * Math.cos(2 * Math.PI * rng.next());
 
@@ -157,4 +158,73 @@ describe("R5 skill end to end", async () => {
     expect(record.status).not.toBe("ok");
     expect(record.steps.flatMap((s) => s.errors).join()).toMatch(/学習率/);
   });
+});
+
+describe("R5: OOB C-index and the no-feature model", () => {
+  // 独立の総当たり（同時刻のイベント vs 打ち切りも数える。lifelines と同じ規則）
+  const brute = (time: number[], event: number[], risk: number[]) => {
+    let conc = 0, comp = 0;
+    for (let i = 0; i < time.length; i++) {
+      if (event[i] !== 1) continue;
+      for (let j = 0; j < time.length; j++) {
+        if (j === i || !(time[j] > time[i] || (time[j] === time[i] && event[j] === 0))) continue;
+        comp++; conc += risk[i] > risk[j] ? 1 : risk[i] === risk[j] ? 0.5 : 0;
+      }
+    }
+    return comp ? conc / comp : null;
+  };
+  it("the mean OOB C equals an independent recount from the same bootstrap draws; rounds without a comparable pair are left out", async () => {
+    const n = 30, B = 40, d = data(5, n, 1, [0.5]);
+    const x = d.values[0] as number[];
+    const fit = () => (i: number) => x[i]; // idx に依らない固定のモデル
+    const r = await bootstrapCorrectedC(d.surv, fit, B, new Rng(11));
+    if ("error" in r) throw new Error(r.error);
+    const rng = new Rng(11);
+    const all = Array.from({ length: n }, (_, i) => i);
+    let sum = 0, cnt = 0;
+    for (let b = 0; b < B; b++) {
+      const idx = Array.from({ length: n }, () => rng.int(n));
+      const inb = new Set(idx);
+      const out = all.filter((i) => !inb.has(i));
+      const c = brute(out.map((i) => d.surv.time[i]), out.map((i) => d.surv.event[i]), out.map((i) => x[i]));
+      if (c !== null) { sum += c; cnt++; }
+    }
+    expect(r.oobN).toBe(cnt);
+    expect(r.oob as number).toBeCloseTo(sum / cnt, 12);
+    // 小さい標本では、OOB に比べられる組が無い回が出る
+    const tiny = data(2, 6, 1, [0.5]);
+    const rt = await bootstrapCorrectedC(tiny.surv, () => (i: number) => (tiny.values[0] as number[])[i], 60, new Rng(3));
+    if ("error" in rt) throw new Error(rt.error);
+    expect(rt.oobN).toBeLessThan(rt.bootstraps);
+  });
+  it("on unrelated features the OOB C stays near 0.5 while a real signal gives a clearly higher OOB C", async () => {
+    const nul = await r5Model(data(21, 60, 40, []).surv, data(21, 60, 40, []).values, data(21, 60, 40, []).names, params({ bootstrapB: 60 }), new Rng(1));
+    const sig = data(22, 100, 8, [0.9, -0.8]);
+    const real = await r5Model(sig.surv, sig.values, sig.names, params({ bootstrapB: 60 }), new Rng(1));
+    if ("error" in nul || "error" in real) throw new Error("failed");
+    expect(Math.abs((nul.corrected!.oob as number) - 0.5)).toBeLessThan(0.1);
+    expect(real.corrected!.oob as number).toBeGreaterThan(0.65);
+  }, 120000);
+  it("a final model with no feature gets no corrected C-index (and says so); a model with features still does", async () => {
+    let seen = false;
+    for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      const d = data(seed, 40, 10, []);
+      const p = readR5Params({ ...R5_DEFAULTS, r5Corr: 0.9, r5Screen: "lasso", r5LassoRule: "1se", r5LassoNLambda: 30, r5BootstrapB: 10 });
+      if ("error" in p) throw new Error(p.error);
+      const r = await r5Model(d.surv, d.values, d.names, p, new Rng(seed));
+      if ("error" in r) continue;
+      if (r.result.selected.length === 0) {
+        seen = true;
+        expect(r.corrected).toBeNull();
+        expect(r.notes.join(" ")).toMatch(/補正 C-index は計算しません/);
+        break;
+      }
+    }
+    expect(seen).toBe(true);
+    const sig = data(31, 120, 6, [1, -0.8]);
+    const ok = await r5Model(sig.surv, sig.values, sig.names, params({ bootstrapB: 20 }), new Rng(1));
+    if ("error" in ok) throw new Error(ok.error);
+    expect(ok.result.selected.length).toBeGreaterThan(0);
+    expect(ok.corrected).not.toBeNull();
+  }, 120000);
 });
