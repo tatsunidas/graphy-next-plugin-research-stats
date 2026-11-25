@@ -26,6 +26,7 @@ import {
   type FinalModel, type NestedCvResult, type P4Cohort, type P4Params, type QcStepResult, type SplitResult, type TestResult,
 } from "./p4";
 import { gridOf, gridText, hyperText, type NestedCvSpec, type PDropEntry } from "./pipeline/nestedCv";
+import { groupIndex } from "./pipeline/split";
 import { testCounts } from "./stats/assumptionReport";
 import { r5Model, R5_DEFAULTS, readR5Params, type R5Model, type R5Params } from "./r5";
 
@@ -87,6 +88,7 @@ export const DATASET_CHECK: Skill = {
     covariates: [],
     deltaOrder: "lesion-then-mean",
   },
+  optional: ["rowsMode"],
   steps: [
     {
       id: "delta",
@@ -117,6 +119,7 @@ export const DATASET_CHECK: Skill = {
         const delta = ctx.state.delta as DeltaResult | undefined;
         if (!ctx.inputs.clinical) return { summary: {}, warnings: [], errors: ["臨床の表がありません（このスキルには臨床の CSV が要ります）"] };
         const idCol = str(p.featureIdColumn, "featureIdColumn")!;
+        if (p.rowsMode !== undefined && p.rowsMode !== "average" && p.rowsMode !== "asis") return { summary: {}, warnings: [], errors: ["行の扱い（rowsMode）は average か asis です"] };
         // 変化率があるときは、患者ごとの変化率の表を特徴量として結合する（1 行 = 1 患者）
         const features = delta
           ? [{ name: "delta", sha256: null, table: deltaToTable(delta, idCol) }]
@@ -126,6 +129,7 @@ export const DATASET_CHECK: Skill = {
           featureColumns: delta ? null : strList(p.featureColumns),
           excludeColumns: delta ? [] : (strList(p.excludeFeatureColumns) ?? []),
           rowFilter: delta ? [] : rowFilterOf(p.rowFilter),
+          rowsMode: p.rowsMode === "asis" ? "asis" : "average",
           clinical: ctx.inputs.clinical, clinicalIdColumn: str(p.clinicalIdColumn, "clinicalIdColumn")!,
           roles: {
             time: str(p.timeColumn, "timeColumn"), event: str(p.eventColumn, "eventColumn"),
@@ -145,6 +149,7 @@ export const DATASET_CHECK: Skill = {
             averagedPatients: rep.averagedPatients, averagedRows: rep.averagedRows,
             lesionsMin: rep.lesionsPerPatient?.min ?? null, lesionsMax: rep.lesionsPerPatient?.max ?? null,
             excludedFeatureColumns: delta ? null : (strList(p.excludeFeatureColumns) ?? []).join(", ") || null,
+            ...(rep.rowsAsIs ? { rowsMode: "asis", rowsUsed: rep.rowsAsIs.rows, patientsUsed: rep.rowsAsIs.patients } : {}),
           },
           warnings: rep.warnings,
         };
@@ -495,6 +500,7 @@ export const P4_PIPELINE: Skill = {
   },
   sources: [],
   defaults: { ...DATASET_CHECK.defaults, ...P4_DEFAULTS },
+  optional: ["rowsMode"],
   steps: [
     ...DATASET_CHECK.steps,
     {
@@ -510,6 +516,18 @@ export const P4_PIPELINE: Skill = {
         ctx.state.p4 = { params: pr, cohort: c, split: null, qc: null, names: [], X: [], spec: null, cv: null, final: null, test: null, leak: null } satisfies P4State;
         const left = d.ids.length - c.ids.length;
         const ev = c.task.kind === "binary" ? c.task.y.reduce((a, b) => a + b, 0) : c.task.surv.event.reduce((a, b) => a + b, 0);
+        if (c.groups) {
+          const g = groupIndex(c.groups), per = g.ids.map(() => 0);
+          g.of.forEach((q) => { per[q]++; });
+          const evP = g.first.reduce((a, i) => a + (c.task.kind === "binary" ? c.task.y[i] : c.task.surv.event[i]), 0);
+          return {
+            summary: { outcomeKind: pr.outcomeKind, rowsMode: "asis", rows: c.ids.length, patients: g.ids.length, rowsPerPatientMin: Math.min(...per), rowsPerPatientMax: Math.max(...per), positivesOrEvents: evP, features: c.names.length, cohortFingerprint: c.fingerprint },
+            warnings: [
+              ...(left ? [`結果が欠けている ${left} 行を除きました`] : []),
+              `行のまま解析します（1 行 = 1 観測、患者でグループ化: ${c.ids.length} 行・${g.ids.length} 人、患者あたり ${Math.min(...per)}〜${Math.max(...per)} 行）。分割は患者単位、性能は行ごとの予測を患者ごとに平均して 1 患者 = 1 点で評価します`,
+            ],
+          };
+        }
         return {
           summary: { outcomeKind: pr.outcomeKind, patients: c.ids.length, positivesOrEvents: ev, features: c.names.length, cohortFingerprint: c.fingerprint },
           warnings: left ? [`結果が欠けている患者 ${left} 人を除きました`] : [],
@@ -529,8 +547,10 @@ export const P4_PIPELINE: Skill = {
         if (st.params.lockMode === "none") warnings.push("テスト集合を作りません（交差検証の推定だけです）");
         const used = r.lock?.evaluations.length ?? 0;
         if (!r.lockIsNew && used > 0) warnings.push(`このテスト集合は既に ${used} 回評価されています`);
+        const gr = st.cohort.groups;
+        const patientCounts: Record<string, number> = gr ? { devPatients: new Set(r.dev.map((i) => gr[i])).size, testPatients: new Set(r.test.map((i) => gr[i])).size } : {};
         return {
-          summary: { lockMode: st.params.lockMode, dev: r.dev.length, test: r.test.length, lockSha256: r.lock?.sha256 ?? null, lockSeed: r.lock?.seed ?? null, evaluationsBefore: r.lock ? used : null },
+          summary: { lockMode: st.params.lockMode, dev: r.dev.length, test: r.test.length, ...patientCounts, lockSha256: r.lock?.sha256 ?? null, lockSeed: r.lock?.seed ?? null, evaluationsBefore: r.lock ? used : null },
           warnings,
         };
       },
@@ -553,7 +573,7 @@ export const P4_PIPELINE: Skill = {
         st.names = q.keep.map((j) => st.cohort.names[j]);
         st.X = subMatrix(st.cohort.X, q.keep);
         const spec = specOf(st.cohort, q.dev, st.params, q.impute);
-        const bad = checkSpec(spec, q.dev.length);
+        const bad = checkSpec(spec, q.dev);
         if (bad) return { summary: {}, warnings: [], errors: [bad] };
         if (st.params.pre.unpaired) spec.pdrop = { alpha: st.params.pre.unpaired.alpha, threshold: st.params.pre.unpaired.threshold, names: st.names, log: [] };
         st.spec = spec;
@@ -561,9 +581,13 @@ export const P4_PIPELINE: Skill = {
         if (q.paired) warnings.push(`対応ありの p 値による除外で特徴量を ${q.removed.filter((r) => r.reason.startsWith("対応あり")).length} 個除きました（一覧は結果にあります）`);
         if (q.unknownExcluded.length) warnings.push(`除外リストにあるが表に無い特徴量が ${q.unknownExcluded.length} 個あります: ${q.unknownExcluded.slice(0, 5).join(", ")}`);
         if (q.droppedDev.length) warnings.push(`欠損のある開発集合の症例 ${q.droppedDev.length} 人を除きました（一覧は結果にあります）`);
-        if (st.names.length > q.dev.length) warnings.push(`特徴量の数（${st.names.length}）が開発集合の症例数（${q.dev.length}）より多く、性能の見積もりの偏りが大きくなりやすい状況です`);
+        if (st.cohort.groups && (st.params.pre.unpaired || st.params.correlationThreshold !== null || st.params.dropConstant)) {
+          warnings.push("行のままの解析では、品質管理（分散 0・相関）と p 値による除外は行を単位に計算します。同じ患者の行は独立でないため、対応なしの p 値は小さく出やすく（過小）、相関は患者内の類似を含みます。止めてはいません");
+        }
+        const nUnits = st.cohort.groups ? new Set(q.dev.map((i) => st.cohort.groups![i])).size : q.dev.length;
+        if (st.names.length > nUnits) warnings.push(`特徴量の数（${st.names.length}）が開発集合の${st.cohort.groups ? "患者数" : "症例数"}（${nUnits}）より多く、性能の見積もりの偏りが大きくなりやすい状況です`);
         return {
-          summary: { featuresBefore: st.cohort.names.length, featuresKept: st.names.length, removed: q.removed.length, pairedAlpha: st.params.pre.paired?.alpha ?? null, pairedThreshold: st.params.pre.paired?.threshold ?? null, pairedTests: q.paired ? Object.entries(q.paired.tests).map(([k, v]) => `${k}:${v}`).join(" ") : null, assumptionAlpha: q.assumptions?.alpha ?? null, assumptionTests: q.assumptions ? Object.entries(testCounts(q.assumptions.rows)).map(([k, v]) => `${k}:${v}`).join(" ") : null, excludeList: exclude ? exclude.length : null, missingCells: q.missingCells, missing: st.params.missing, droppedDev: q.droppedDev.length, dev: q.dev.length, ratio: Number((q.dev.length / st.names.length).toFixed(3)) },
+          summary: { featuresBefore: st.cohort.names.length, featuresKept: st.names.length, removed: q.removed.length, pairedAlpha: st.params.pre.paired?.alpha ?? null, pairedThreshold: st.params.pre.paired?.threshold ?? null, pairedTests: q.paired ? Object.entries(q.paired.tests).map(([k, v]) => `${k}:${v}`).join(" ") : null, assumptionAlpha: q.assumptions?.alpha ?? null, assumptionTests: q.assumptions ? Object.entries(testCounts(q.assumptions.rows)).map(([k, v]) => `${k}:${v}`).join(" ") : null, excludeList: exclude ? exclude.length : null, missingCells: q.missingCells, missing: st.params.missing, droppedDev: q.droppedDev.length, dev: q.dev.length, ratio: Number((nUnits / st.names.length).toFixed(3)) },
           warnings,
         };
       },
@@ -587,6 +611,7 @@ export const P4_PIPELINE: Skill = {
             lassoRule: st.params.lassoRule, lassoNLambda: st.params.model === "lasso" ? st.params.lassoNLambda : null,
             grid: st.params.ml ? gridText(st.params.ml) : null, gridSize: st.params.ml ? gridOf(st.params.ml).length : null, fits: fitCount(st.params),
             mean: fmt(cv.summary.mean), min: fmt(cv.summary.min), max: fmt(cv.summary.max), valid: cv.summary.valid, total: cv.summary.total,
+            ...(st.spec!.groups ? { evalUnit: "patient-mean-of-row-predictions" } : {}),
             pooledMean: pooled.length ? fmt(pooled.reduce((a, b) => a + b, 0) / pooled.length) : null,
             ...pdropSummary(st.spec!.pdrop?.log.filter((e) => e.scope !== "final" && !e.scope.startsWith("final.")) ?? null),
           },
@@ -628,7 +653,7 @@ export const P4_PIPELINE: Skill = {
       title: { ja: "データリークの検査（分割と前処理）", en: "Data leakage check (splits and preprocessing)" },
       run(ctx): StepOutcome {
         const st = ctx.state.p4 as P4State;
-        const ids = st.cohort.ids;
+        const ids = st.cohort.groups ?? st.cohort.ids;
         const split = checkPatientSplit(
           { outerK: st.spec!.outerK, innerK: st.spec!.innerK, outerAssign: st.cv!.outerAssign, innerAssign: st.cv!.innerAssign },
           st.qc!.dev.map((i) => ids[i]), (st.split?.test ?? []).map((i) => ids[i]),
@@ -645,6 +670,7 @@ export const P4_PIPELINE: Skill = {
         return {
           summary: {
             splitCheck: split.ok ? "OK" : "NG", splitChecked: split.checked, splitPatients: split.patients.join(", ") || null,
+            ...(st.cohort.groups ? { splitUnit: "patient" } : {}),
             rowUseCheck: rowUse.level === "ok" ? "OK" : rowUse.level === "notice" ? "NOTICE" : "NG",
             rowUseFindings: rowUse.findings.map((f) => `${f.stage}@${f.where}:${f.violating}/${f.entries}`).join(" ") || null,
           },
@@ -666,6 +692,7 @@ export const P4_PIPELINE: Skill = {
         const warnings: string[] = [];
         if (r.evaluation > 1) warnings.push(`このテスト集合での ${r.evaluation} 回目の評価です。報告に回数を書いてください`);
         if (r.excluded.length) warnings.push(`欠損で予測できないテスト症例 ${r.excluded.length} 人を除きました`);
+        if (st.cohort.groups) warnings.push("テスト集合の評価は、行ごとの予測を患者ごとに平均して 1 患者 = 1 点で行いました");
         if (r.output === "decision") warnings.push("SVM の出力は確率ではないので、較正は出していません");
         return { summary: { evaluation: r.evaluation, n: r.n, value: fmt(r.value), lower: fmt(r.lower), upper: fmt(r.upper), output: r.output, lockSha256: r.lock.sha256, excluded: r.excluded.length }, warnings };
       },

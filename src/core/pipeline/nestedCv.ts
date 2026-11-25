@@ -88,7 +88,7 @@ function prepare(X: (number | null)[][], task: Task, train: number[], spec: Nest
   const drop = pd.fixed ?? pdropColumns(X, task, train, pd, spec.trace);
   return { ...imp, usable: imp.usable.map((u, j) => u && !drop.has(j)) };
 }
-import { stratifiedFolds } from "./split";
+import { foldsFor, groupIndex } from "./split";
 import type { RowTrace } from "./rowTrace";
 import { lassoCv, type LambdaRule } from "../model/lasso";
 import { randomForest, sqrtMtry } from "../model/randomForest";
@@ -151,7 +151,18 @@ export interface NestedCvSpec {
   trace?: RowTrace;
   /** 対応なしの p 値による除外（二値だけ。省略なら行わない）。 */
   pdrop?: PDropSpec;
+  /**
+   * X の行ごとの患者 ID（行のまま解析するとき）。あれば、外側・内側・LASSO の分割を患者単位にし（層化は患者の結果）、
+   * 性能（AUC・C-index）は行ごとの予測を患者ごとに平均して 1 患者 = 1 点で評価する。省略なら 1 行 = 1 症例。
+   */
+  groups?: readonly string[] | null;
 }
+
+/** rows の並びの患者 ID（groups が無ければ null）。 */
+const groupsOf = (spec: NestedCvSpec, rows: readonly number[]): string[] | null => (spec.groups ? rows.map((i) => (spec.groups as readonly string[])[i]) : null);
+
+/** 分割の単位の数（患者単位なら開発集合の患者数、そうでなければ行数）。 */
+export const unitsOf = (spec: NestedCvSpec, dev: readonly number[]): number => (spec.groups ? new Set(groupsOf(spec, dev)).size : dev.length);
 
 /** **試験専用**の漏れ（画面からは選べない）。負例として、偏りが出ることを確かめるために使う。 */
 export interface Leak {
@@ -223,9 +234,21 @@ export function fitTopK(imp: Imputed, task: Task, train: number[], ranking: numb
   return { ...base, predict: (i) => { const z = standardizeRow(st, imp.X[i]); return z ? z.reduce((a, v, q) => a + v * beta[q], 0) : null; } };
 }
 
+/**
+ * 行ごとの予測を患者（g）ごとに平均して 1 患者 = 1 点にする（欠けた予測は呼び出し側で除いておく）。
+ * 患者の行番号（結果の引き先）は、その患者の先頭の行。
+ */
+export function meanByGroup<T extends { i: number; v: number; g: string }>(items: T[]): T[] {
+  const gi = groupIndex(items.map((x) => x.g));
+  const sum = gi.ids.map(() => 0), n = gi.ids.map(() => 0);
+  items.forEach((x, k) => { sum[gi.of[k]] += x.v; n[gi.of[k]]++; });
+  return gi.ids.map((_, q) => ({ ...items[gi.first[q]], v: sum[q] / n[q] }));
+}
+
 /** 行 rows の予測の評価（二値は AUC、生存は Harrell の C）。予測が欠けた行は除く。 */
-export function scoreRows(task: Task, rows: number[], pred: (number | null)[]): number | null {
-  const ok = rows.map((i, q) => ({ i, v: pred[q] })).filter((x): x is { i: number; v: number } => x.v !== null);
+export function scoreRows(task: Task, rows: number[], pred: (number | null)[], groups: readonly string[] | null = null): number | null {
+  let ok = rows.map((i, q) => ({ i, v: pred[q], g: groups ? groups[q] : "" })).filter((x): x is { i: number; v: number; g: string } => x.v !== null);
+  if (groups) ok = meanByGroup(ok);
   if (task.kind === "binary") return auc({ score: ok.map((x) => x.v), label: ok.map((x) => task.y[x.i]) });
   return cIndex(subSurv(task.surv, ok.map((x) => x.i)), ok.map((x) => x.v));
 }
@@ -245,7 +268,7 @@ export interface InnerChoice {
 
 /** 訓練の行 T の中で、内側の交差検証（層化しない）により k を選ぶ。 */
 export function chooseK(X: (number | null)[][], task: Task, T: number[], spec: NestedCvSpec, rng: Rng, fixedRanking: number[] | null, fixedRows: number[] | null = null): InnerChoice {
-  const folds = stratifiedFolds(T.length, null, spec.innerK, rng);
+  const folds = foldsFor(T.length, null, spec.innerK, rng, groupsOf(spec, T));
   const K = spec.kCandidates;
   const pooled: (number | null)[][] = K.map(() => new Array<number | null>(T.length).fill(null));
   const perFold: (number | null)[][] = K.map(() => []);
@@ -260,12 +283,12 @@ export function chooseK(X: (number | null)[][], task: Task, T: number[], spec: N
       const m = fitTopK(imp, task, tin, ranking, k, spec.trace);
       const pr = tout.map((i) => ("error" in m ? null : m.predict(i)));
       pos.forEach((p, q) => { pooled[a][p] = pr[q]; });
-      perFold[a].push("error" in m ? null : scoreRows(task, tout, pr));
+      perFold[a].push("error" in m ? null : scoreRows(task, tout, pr, groupsOf(spec, tout)));
     });
     spec.trace?.leave();
   }
   const scores = K.map((_, a) => {
-    if (task.kind === "binary") return scoreRows(task, T, pooled[a]);
+    if (task.kind === "binary") return scoreRows(task, T, pooled[a], groupsOf(spec, T));
     const v = perFold[a].filter((x): x is number => x !== null);
     return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null;
   });
@@ -296,7 +319,7 @@ export function fitLassoOn(X: (number | null)[][], task: Task, T: number[], spec
       return (c: number[]) => c.filter((j) => !drop.has(j));
     }
     : undefined;
-  const r = lassoCv(task, imp.X, T, cols, { nLambda: model.nLambda, ratio: lassoRatioFor(T.length, cols.length), folds: spec.innerK, rule: model.rule, colsForFold }, rng);
+  const r = lassoCv(task, imp.X, T, cols, { nLambda: model.nLambda, ratio: lassoRatioFor(T.length, cols.length), folds: spec.innerK, rule: model.rule, colsForFold, groups: groupsOf(spec, T) ?? undefined }, rng);
   if ("error" in r) return r;
   const nz = r.std.cols.map((c, a) => ({ c, a })).filter((x) => r.coef.beta[x.a] !== 0);
   const predict = (i: number): number | null => {
@@ -354,7 +377,7 @@ export function fitMl(imp: Imputed, task: Task, train: number[], h: Hyper, kind:
 
 /** 訓練の行 T の中で、内側の交差検証（層化しない）により格子の点を選ぶ。基準は内側の予測を束ねた AUC、同じ値なら格子の前の点。 */
 export function chooseHyper(X: (number | null)[][], task: Task, T: number[], spec: NestedCvSpec, model: MlSpec, rng: Rng): InnerChoice {
-  const folds = stratifiedFolds(T.length, null, spec.innerK, rng);
+  const folds = foldsFor(T.length, null, spec.innerK, rng, groupsOf(spec, T));
   const grid = gridOf(model);
   const pooled: (number | null)[][] = grid.map(() => new Array<number | null>(T.length).fill(null));
   for (let f = 0; f < spec.innerK; f++) {
@@ -369,7 +392,7 @@ export function chooseHyper(X: (number | null)[][], task: Task, T: number[], spe
     spec.trace?.leave();
   }
   // 束ねた AUC は、内側のどこかで当てはめに失敗した点（予測が欠けた行がある点）を評価しない
-  const scores = grid.map((_, a) => (pooled[a].some((v) => v === null) ? null : scoreRows(task, T, pooled[a])));
+  const scores = grid.map((_, a) => (pooled[a].some((v) => v === null) ? null : scoreRows(task, T, pooled[a], groupsOf(spec, T))));
   let best: number | null = null;
   scores.forEach((s, a) => {
     if (s === null) return;
@@ -434,7 +457,8 @@ export function validateMl(m: MlSpec): string | null {
   return null;
 }
 
-export function validateSpec(spec: NestedCvSpec, nDev: number): string | null {
+/** nDev は分割の単位の数（{@link unitsOf}）、nRows は開発集合の行数（層の長さの検査。省略なら nDev）。 */
+export function validateSpec(spec: NestedCvSpec, nDev: number, nRows: number = nDev): string | null {
   const int = (v: number) => Number.isInteger(v);
   if (!int(spec.outerK) || spec.outerK < 2 || spec.outerK > nDev) return `外側の分割数は 2 以上 ${nDev} 以下の整数にしてください`;
   const minTrain = nDev - Math.ceil(nDev / spec.outerK);
@@ -450,13 +474,13 @@ export function validateSpec(spec: NestedCvSpec, nDev: number): string | null {
     if (!spec.kCandidates.length || spec.kCandidates.some((k) => !int(k) || k < 1)) return "特徴量の数の候補は 1 以上の整数で 1 つ以上入れてください";
     if (new Set(spec.kCandidates).size !== spec.kCandidates.length) return "特徴量の数の候補が重複しています";
   }
-  if (spec.strata && spec.strata.length !== nDev) return "層の長さが開発集合の人数と違います";
+  if (spec.strata && spec.strata.length !== nRows) return "層の長さが開発集合の人数と違います";
   return null;
 }
 
 /** dev は X の行番号（開発集合）。テスト集合の行は渡さないこと（ここでは一切見ない）。 */
 export async function nestedCv(X: (number | null)[][], task: Task, dev: number[], spec: NestedCvSpec, rng: Rng, tick?: Tick, leak: Leak = {}): Promise<NestedCvResult> {
-  const bad = validateSpec(spec, dev.length);
+  const bad = validateSpec(spec, unitsOf(spec, dev), dev.length);
   if (bad) throw new RangeError(bad);
   const m = X[0]?.length ?? 0;
   const counts = new Array<number>(m).fill(0);
@@ -466,7 +490,7 @@ export async function nestedCv(X: (number | null)[][], task: Task, dev: number[]
   const folds: OuterFold[] = [], outerAssign: number[][] = [], innerAssign: number[][][] = [], pred: (number | null)[][] = [], pooled: (number | null)[] = [];
   const total = spec.repeats * spec.outerK;
   for (let r = 0; r < spec.repeats; r++) {
-    const assign = stratifiedFolds(dev.length, spec.strata, spec.outerK, rng);
+    const assign = foldsFor(dev.length, spec.strata, spec.outerK, rng, groupsOf(spec, dev));
     outerAssign.push(assign);
     const inner: number[][] = [];
     const pr = new Array<number | null>(dev.length).fill(null);
@@ -492,7 +516,7 @@ export async function nestedCv(X: (number | null)[][], task: Task, dev: number[]
             for (const j of mdl.cols) counts[j]++;
             const v = V.map((i) => mdl.predict(i));
             pos.forEach((p, q) => { pr[p] = v[q]; });
-            row.score = scoreRows(task, V, v);
+            row.score = scoreRows(task, V, v, groupsOf(spec, V));
           }
         }
         folds.push(row);
@@ -510,7 +534,7 @@ export async function nestedCv(X: (number | null)[][], task: Task, dev: number[]
           for (const j of fit.trained.cols) counts[j]++;
           const v = V.map((i) => fit.trained.predict(i));
           pos.forEach((p, q) => { pr[p] = v[q]; });
-          row.score = scoreRows(task, V, v);
+          row.score = scoreRows(task, V, v, groupsOf(spec, V));
         }
         folds.push(row);
         continue;
@@ -529,14 +553,14 @@ export async function nestedCv(X: (number | null)[][], task: Task, dev: number[]
           for (const j of mdl.cols) counts[j]++;
           const v = V.map((i) => mdl.predict(i));
           pos.forEach((p, q) => { pr[p] = v[q]; });
-          row.score = scoreRows(task, V, v);
+          row.score = scoreRows(task, V, v, groupsOf(spec, V));
         }
       }
       folds.push(row);
     }
     innerAssign.push(inner);
     pred.push(pr);
-    pooled.push(task.kind === "binary" ? scoreRows(task, dev, pr) : null);
+    pooled.push(task.kind === "binary" ? scoreRows(task, dev, pr, groupsOf(spec, dev)) : null);
   }
   await tick?.("nested-cv", 1);
   const sc = folds.map((f) => f.score).filter((x): x is number => x !== null);

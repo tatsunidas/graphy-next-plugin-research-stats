@@ -49,7 +49,7 @@ export async function runSkill(
   skill: Skill, inputs: RunInputs, params: Record<string, ParamValue>, opts: RunOptions,
 ): Promise<{ record: RunRecord; state: Record<string, unknown> }> {
   const merged: Record<string, ParamValue> = { ...skill.defaults, ...params };
-  const unknown = Object.keys(params).filter((k) => !(k in skill.defaults));
+  const unknown = Object.keys(params).filter((k) => !(k in skill.defaults) && !skill.optional?.includes(k));
   if (unknown.length) throw new Error(`スキル ${skill.id} に無い設定です: ${unknown.join(", ")}`);
   const changed = Object.keys(merged).filter((k) => !same(merged[k], skill.defaults[k]));
 

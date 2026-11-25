@@ -13,7 +13,7 @@
  */
 import type { Rng } from "../rng";
 import type { Surv } from "../survival/types";
-import { stratifiedFolds } from "../pipeline/split";
+import { foldsFor } from "../pipeline/split";
 import { meanSd } from "../stats/standardize";
 import { breslow, riskSets, subSurv, type Risk } from "./breslow";
 
@@ -271,6 +271,8 @@ export interface LassoOptions {
   rule: LambdaRule;
   /** 分割ごとに、その訓練の行で使う列を絞る（二値の p 値による除外）。省略なら全分割で同じ列。 */
   colsForFold?: (tr: number[], fold: number) => (cols: number[]) => number[];
+  /** rows の並びの患者 ID。あれば、交差検証の分割を患者単位にする（同じ患者の行は同じ分割）。 */
+  groups?: readonly string[];
 }
 
 export interface LassoCvResult {
@@ -298,7 +300,8 @@ export interface LassoCvResult {
 function validate(o: LassoOptions, nRows: number): string | null {
   if (!Number.isInteger(o.nLambda) || o.nLambda < 2 || o.nLambda > 1000) return "λ の点の数は 2 以上 1000 以下の整数にしてください";
   if (!(o.ratio > 0 && o.ratio < 1)) return "最小の λ の比は 0 より大きく 1 より小さい値にしてください";
-  if (!Number.isInteger(o.folds) || o.folds < 2 || o.folds > nRows) return `交差検証の分割数は 2 以上 ${nRows} 以下の整数にしてください`;
+  const units = o.groups ? new Set(o.groups).size : nRows;
+  if (!Number.isInteger(o.folds) || o.folds < 2 || o.folds > units) return `交差検証の分割数は 2 以上 ${units} 以下の整数にしてください`;
   return null;
 }
 
@@ -321,7 +324,7 @@ export function lassoCv(task: LassoTask, X: number[][], rows: number[], cols: nu
   const path = lassoPath(lik, Z, lambdas, b0);
   if (!path.points.length) return { error: path.stopped ?? "経路を解けませんでした" };
 
-  const foldOf = stratifiedFolds(rows.length, null, o.folds, rng);
+  const foldOf = foldsFor(rows.length, null, o.folds, rng, o.groups);
   const L = lambdas.length;
   const raw: { w: number; v: (number | null)[] }[] = [];
   for (let f = 0; f < o.folds; f++) {
