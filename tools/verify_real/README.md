@@ -7,6 +7,7 @@
 | ファイル | 役割 |
 | --- | --- |
 | `run_core.mts` / `run_core.sh` | `runSkill` と各 Skill を Node から直接呼び、固定シードで結果（書き出し機能と同じ CSV と、状態の要約）を JSON に出す。実行する設定（シード・分割数・しきい値・負例の入れ替え）は、すべて `run_core.mts` の `RUNS` と出力 JSON の `params` に残る |
+| `r5_ref.py` | R5 の手順（相関除外 → Cox ブースティング → 後退選択 → 最終 Cox → Harrell の補正）を独立に書き直した参照。`selftest`（lifelines と比較）と、`perm`（時間とイベントを入れ替えた補正 C-index を複数回）。元データで見かけの C-index が本体と全桁一致することを確かめてから使う。結果と考察は SSD の `runs/skill_verify/R5_INVESTIGATION.md` |
 | `verify_real.py` | JSON を読み、参照実装（lifelines・scipy・scikit-learn・statsmodels・pingouin と、定義から書いた自前の Cox（Efron）・log-rank・DeLong・C-index 等）と突き合わせて `REPORT.md` を書く。合格・失敗・未達（前提待ち）を分けて数える |
 
 ## 環境変数
