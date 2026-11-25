@@ -7,7 +7,7 @@ import type { Locale, ParamValue, Skill } from "./skill";
 
 const lam = (v: unknown) => (typeof v === "number" ? v.toPrecision(3) : "?");
 const short = (h: string | null, locale: Locale) => (h === null ? (locale === "ja" ? "未取得" : "not available") : h.slice(0, 12));
-const show = (v: ParamValue) => (Array.isArray(v) ? `[${v.join(", ")}]` : v === null ? "null" : String(v));
+const show = (v: ParamValue) => (Array.isArray(v) ? `[${(v as (string | { column: string; values: string[] })[]).map((x) => (typeof x === "string" ? x : `${x.column}=${x.values.join("|")}`)).join(", ")}]` : v === null ? "null" : String(v));
 
 const GROUP_JA: Record<string, string> = { median: "中央値", value: "指定した値", tertile: "三分位", optimal: "最適しきい値（log-rank のχ²が最大になる値。探索的）" };
 const GROUP_EN: Record<string, string> = { median: "the median", value: "a specified value", tertile: "tertiles", optimal: "an optimal cut-off (maximising the log-rank statistic; exploratory)" };
@@ -178,6 +178,35 @@ function r5Lines(record: RunRecord, locale: Locale): string[] {
   return L;
 }
 
+/** 行の絞り込み・平均・リーク検査の記録から作る文。 */
+function dataLines(record: RunRecord, locale: Locale): string[] {
+  const ja = locale === "ja";
+  const L: string[] = [];
+  const join = record.steps.find((s) => s.id === "join" && s.status === "ok");
+  if (join) {
+    const f = join.summary.rowFilter;
+    if (typeof f === "string") L.push(ja ? `特徴量の表の行を ${f.replace(/;/g, "、")} に絞り込んだ（外した行 ${join.summary.filteredRows} 行）。` : `Rows of the feature table were restricted to ${f.replace(/;/g, "; ")} (${join.summary.filteredRows} rows removed).`);
+    if (Number(join.summary.averagedPatients) > 0) L.push(ja
+      ? `同じ患者に複数の行がある ${join.summary.averagedPatients} 人（計 ${join.summary.averagedRows} 行、患者あたり ${join.summary.lesionsMin}〜${join.summary.lesionsMax} 行）は、欠損を除く平均で患者ごとに 1 行にまとめた。`
+      : `For ${join.summary.averagedPatients} patients with several rows (${join.summary.averagedRows} rows in total; ${join.summary.lesionsMin} to ${join.summary.lesionsMax} rows per patient), the rows were averaged per patient, ignoring missing values.`);
+    if (typeof join.summary.excludedFeatureColumns === "string") L.push(ja ? `特徴量から外した列: ${join.summary.excludedFeatureColumns}。` : `Columns excluded from the features: ${join.summary.excludedFeatureColumns}.`);
+  }
+  const leak = record.steps.find((s) => s.id === "leak" && s.status === "ok");
+  if (leak) {
+    const idl = Number(leak.summary.idLikeUsed), tl = Number(leak.summary.targetLeaks);
+    L.push(ja
+      ? `データリークの検査: ID・由来・記録に当たる列が特徴量に ${idl} 個${idl ? `（${leak.summary.idLikeColumns}）` : ""}、目的変数の混入の疑いがある特徴量が ${tl} 個${tl ? `（${leak.summary.targetLeakDetail}）` : ""}あった。`
+      : `Leakage check: ${idl} ID, provenance or record columns were among the features${idl ? ` (${leak.summary.idLikeColumns})` : ""}; ${tl} features were suspected of containing the outcome${tl ? ` (${leak.summary.targetLeakDetail})` : ""}.`);
+  }
+  const p4 = record.steps.find((s) => s.id === "p4-leak" && s.status === "ok");
+  if (p4) L.push(ja
+    ? `分割の検査（同じ患者が訓練と検証に分かれていないか）: ${p4.summary.splitCheck}。前処理・特徴量選択の推定に使った行の検査（訓練側の行だけか）: ${p4.summary.rowUseCheck === "NOTICE" ? "注意（教師なしの処理だけが訓練側でない行の値を読んだ。結果ラベルは使っていない）" : p4.summary.rowUseCheck}${p4.summary.rowUseFindings ? `（${p4.summary.rowUseFindings}）` : ""}。`
+    : `Split check (no patient in both training and validation): ${p4.summary.splitCheck}. Row-use check (preprocessing and selection estimated from training rows only): ${p4.summary.rowUseCheck === "NOTICE" ? "notice (only unsupervised steps read values of rows outside the training side; the outcome labels were not used)" : p4.summary.rowUseCheck}${p4.summary.rowUseFindings ? ` (${p4.summary.rowUseFindings})` : ""}.`);
+  const r5 = record.steps.find((s) => s.id === "r5-model" && s.status === "ok");
+  if (r5 && r5.summary.splitCheck) L.push(ja ? `LASSO の交差検証の分割の検査（同じ患者が訓練と検証に分かれていないか）: ${r5.summary.splitCheck}。` : `LASSO fold check (no patient in both training and validation): ${r5.summary.splitCheck}.`);
+  return L;
+}
+
 export function methodText(record: RunRecord, skill: Skill, locale: Locale): string {
   const join = record.steps.find((s) => s.id === "join");
   const delta = record.steps.find((s) => s.id === "delta" && s.status === "ok");
@@ -194,6 +223,7 @@ export function methodText(record: RunRecord, skill: Skill, locale: Locale): str
       if (join.summary.survivalUsable !== null && join.summary.survivalUsable !== undefined) lines.push(`時間とイベントが揃った患者は ${join.summary.survivalUsable} 人であった。`);
       lines.push("欠損は 0 で補わず、欠損のまま扱った（複数病変の平均は欠損を除いて求めた）。");
     }
+    lines.push(...dataLines(record, "ja"));
     lines.push(...r1Lines(record, "ja"), ...r2Lines(record, "ja"), ...r3Lines(record, "ja"), ...p4Lines(record, "ja"), ...r5Lines(record, "ja"));
     lines.push(`乱数シード: ${record.seed}。${changed.length ? `既定値から変更した設定: ${changed.join("、")}。` : "設定は既定値のままであった。"}`);
     lines.push("研究用であり、診断・治療の判断に用いない。");
@@ -206,6 +236,7 @@ export function methodText(record: RunRecord, skill: Skill, locale: Locale): str
       if (join.summary.survivalUsable !== null && join.summary.survivalUsable !== undefined) lines.push(`${join.summary.survivalUsable} patients had both time and event.`);
       lines.push("Missing values were not filled with 0 and were kept missing (the mean over several lesions ignores missing values).");
     }
+    lines.push(...dataLines(record, "en"));
     lines.push(...r1Lines(record, "en"), ...r2Lines(record, "en"), ...r3Lines(record, "en"), ...p4Lines(record, "en"), ...r5Lines(record, "en"));
     lines.push(`Random seed: ${record.seed}. ${changed.length ? `Settings changed from the defaults: ${changed.join("; ")}.` : "All settings were the defaults."}`);
     lines.push("For research use only; not for diagnostic or treatment decisions.");

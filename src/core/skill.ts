@@ -7,7 +7,7 @@ import type { Rng } from "./rng";
 
 export type Locale = "ja" | "en";
 export type LocalText = Record<Locale, string>;
-export type ParamValue = string | number | boolean | null | string[];
+export type ParamValue = string | number | boolean | null | string[] | { column: string; values: string[] }[];
 
 export interface RunInputs {
   features: TableSource[];

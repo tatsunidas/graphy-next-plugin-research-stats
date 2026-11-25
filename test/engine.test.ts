@@ -18,7 +18,7 @@ describe("runSkill", () => {
   it("runs the join, skips the delta step and records everything needed to reproduce", async () => {
     const { record, state } = await runSkill(DATASET_CHECK, inputs(), params, opts);
     expect(record.status).toBe("ok");
-    expect(record.steps.map((s) => `${s.id}:${s.status}`)).toEqual(["delta:skipped", "join:ok"]);
+    expect(record.steps.map((s) => `${s.id}:${s.status}`)).toEqual(["delta:skipped", "join:ok", "leak:ok"]);
     expect(record.steps[1].summary).toMatchObject({ joined: 2, featureOnly: 0, clinicalOnly: 1, survivalUsable: 2, features: 1 });
     expect(record.seed).toBe(42);
     expect(record.pluginVersion).toBe("0.1.0");
@@ -50,7 +50,7 @@ describe("runSkill", () => {
     const fol = sourceOf("fol.csv", "CaseLabel,Patient,f1\nL1,P1,15\nL2,P2,10\n");
     const { record, state } = await runSkill(DATASET_CHECK, { ...inputs(), baseline: [base], followup: [fol] }, { ...params, featureIdColumn: "CaseLabel" }, opts);
     expect(record.status).toBe("ok");
-    expect(record.steps.map((s) => s.status)).toEqual(["ok", "ok"]);
+    expect(record.steps.map((s) => s.status)).toEqual(["ok", "ok", "ok"]);
     const ds = state.dataset as { featureNames: string[]; features: number[][] };
     expect(ds.featureNames).toEqual(["Delta_f1"]);
     expect(ds.features).toEqual([[50], [-50]]);

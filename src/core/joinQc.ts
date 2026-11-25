@@ -131,7 +131,7 @@ export function assignPair(features: readonly CsvTable[], pair: PairOverlap, hin
   if (unique(pair.featureColumn)) return { featureId: pair.featureColumn, patient: null };
   let featureId = hintFeatureId;
   if (featureId === pair.featureColumn || !unique(featureId)) {
-    const alt = uniqueNames(features).find((c) => c !== pair.featureColumn && unique(c));
+    const alt = (unique("RowKey") && pair.featureColumn !== "RowKey" ? "RowKey" : undefined) ?? uniqueNames(features).find((c) => c !== pair.featureColumn && unique(c));
     if (alt) featureId = alt;
   }
   return { featureId, patient: pair.featureColumn };

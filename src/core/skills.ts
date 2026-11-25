@@ -2,7 +2,9 @@
  * 組み込みのスキル。この段（基盤）は「データセットの確認」だけで、統計の手法は持たない。
  * 結合・集約・変化率の結果を確かめ、結合済みのデータセットを書き出すために使う。
  */
-import { buildDataset, type Dataset, type JoinReport } from "./dataset";
+import { buildDataset, type Dataset, type JoinReport, type RowFilter } from "./dataset";
+import { checkPatientSplit, checkRowUse, idLikeColumns, targetLeaks, type RowUseCheck, type SplitCheck } from "./leak";
+import { RowTrace } from "./pipeline/rowTrace";
 import { buildDelta, deltaToTable, type DeltaOrder, type DeltaResult } from "./delta";
 import type { ParamValue, Skill, StepOutcome } from "./skill";
 import {
@@ -25,6 +27,10 @@ import {
 import { gridOf, gridText, hyperText, type NestedCvSpec } from "./pipeline/nestedCv";
 import { r5Model, R5_DEFAULTS, readR5Params, type R5Model, type R5Params } from "./r5";
 
+const strList = (v: ParamValue): string[] | null => (Array.isArray(v) && v.every((x) => typeof x === "string") ? (v as string[]) : null);
+const rowFilterOf = (v: ParamValue): RowFilter[] => (Array.isArray(v) ? (v.filter((x) => typeof x === "object") as RowFilter[]) : []);
+export const filterText = (f: readonly RowFilter[]) => f.map((x) => `${x.column}=${x.values.join("|")}`).join(";");
+
 const str = (v: ParamValue, name: string): string | null => {
   if (v === null || v === "") return null;
   if (typeof v !== "string") throw new Error(`設定「${name}」は文字列にしてください`);
@@ -43,6 +49,8 @@ export const DATASET_CHECK: Skill = {
     featureIdColumn: "CaseLabel",
     patientColumn: null,
     featureColumns: null,
+    rowFilter: [],
+    excludeFeatureColumns: [],
     clinicalIdColumn: "CaseLabel",
     timeColumn: null,
     eventColumn: null,
@@ -58,11 +66,11 @@ export const DATASET_CHECK: Skill = {
         const { baseline, followup } = ctx.inputs;
         if (!baseline?.length || !followup?.length) return { summary: {}, warnings: [], skipped: true };
         const order = ctx.params.deltaOrder as DeltaOrder;
-        const featureColumns = ctx.params.featureColumns;
+        const featureColumns = strList(ctx.params.featureColumns);
         const r = buildDelta({
           baseline, followup, idColumn: str(ctx.params.featureIdColumn, "featureIdColumn")!,
           patientColumn: str(ctx.params.patientColumn, "patientColumn"),
-          featureColumns: Array.isArray(featureColumns) ? featureColumns : null, order,
+          featureColumns, order,
         });
         if (!r.ok) return { summary: {}, warnings: [], errors: r.errors };
         ctx.state.delta = r.result;
@@ -86,11 +94,13 @@ export const DATASET_CHECK: Skill = {
           : ctx.inputs.features;
         const r = buildDataset({
           features, featureIdColumn: idCol, patientColumn: delta ? null : str(p.patientColumn, "patientColumn"),
-          featureColumns: delta ? null : Array.isArray(p.featureColumns) ? p.featureColumns : null,
+          featureColumns: delta ? null : strList(p.featureColumns),
+          excludeColumns: delta ? [] : (strList(p.excludeFeatureColumns) ?? []),
+          rowFilter: delta ? [] : rowFilterOf(p.rowFilter),
           clinical: ctx.inputs.clinical, clinicalIdColumn: str(p.clinicalIdColumn, "clinicalIdColumn")!,
           roles: {
             time: str(p.timeColumn, "timeColumn"), event: str(p.eventColumn, "eventColumn"),
-            outcome: str(p.outcomeColumn, "outcomeColumn"), covariates: Array.isArray(p.covariates) ? p.covariates : [],
+            outcome: str(p.outcomeColumn, "outcomeColumn"), covariates: strList(p.covariates) ?? [],
           },
         });
         if (!r.ok) return { summary: {}, warnings: [], errors: r.errors };
@@ -102,8 +112,37 @@ export const DATASET_CHECK: Skill = {
             featureRows: rep.featureRows, patientsInFeatures: rep.patientsInFeatures, patientsInClinical: rep.patientsInClinical,
             joined: rep.joined, featureOnly: rep.featureOnly.length, clinicalOnly: rep.clinicalOnly.length,
             features: r.dataset.featureNames.length, survivalUsable: rep.survivalUsable,
+            rowFilter: delta || !rowFilterOf(p.rowFilter).length ? null : filterText(rowFilterOf(p.rowFilter)), filteredRows: rep.filteredRows,
+            averagedPatients: rep.averagedPatients, averagedRows: rep.averagedRows,
+            lesionsMin: rep.lesionsPerPatient?.min ?? null, lesionsMax: rep.lesionsPerPatient?.max ?? null,
+            excludedFeatureColumns: delta ? null : (strList(p.excludeFeatureColumns) ?? []).join(", ") || null,
           },
           warnings: rep.warnings,
+        };
+      },
+    },
+    {
+      id: "leak",
+      title: { ja: "データリークの検査（列）", en: "Data leakage check (columns)" },
+      run(ctx): StepOutcome {
+        const d = ctx.state.dataset as Dataset | undefined;
+        if (!d) return { summary: {}, warnings: [], skipped: true };
+        const warnings: string[] = [];
+        let idLike: string[] = [];
+        if (!ctx.state.delta) {
+          const p = ctx.params;
+          idLike = idLikeColumns(ctx.inputs.features.map((f) => f.table), [str(p.featureIdColumn, "featureIdColumn"), str(p.patientColumn, "patientColumn")], d.featureNames)
+            .filter((c) => c.used).map((c) => c.column);
+        }
+        if (idLike.length) warnings.push(`ID・由来・記録に当たる列が特徴量に入っています: ${idLike.slice(0, 8).join(", ")}${idLike.length > 8 ? " …" : ""}`);
+        const tl = targetLeaks(d);
+        if (tl.length) warnings.push(`目的変数の混入の疑いがある特徴量があります: ${tl.slice(0, 5).map((x) => `${x.feature}（${x.target}: ${x.kinds.join("・")}）`).join(", ")}${tl.length > 5 ? " …" : ""}`);
+        return {
+          summary: {
+            idLikeUsed: idLike.length, idLikeColumns: idLike.join(", ") || null,
+            targetLeaks: tl.length, targetLeakDetail: tl.map((x) => `${x.feature}:${x.target}:${x.kinds.join("+")}`).join("; ") || null,
+          },
+          warnings,
         };
       },
     },
@@ -367,7 +406,11 @@ export interface P4State {
   cv: NestedCvResult | null;
   final: FinalModel | null;
   test: TestResult | null;
+  /** リークの検査（患者の分割・前処理の行）。最終モデルの後に作る。 */
+  leak: { split: SplitCheck; rowUse: RowUseCheck } | null;
 }
+
+const WHERE_JA = { pre: "交差検証の前", fold: "外側の分割", inner: "内側の分割", final: "最終モデル", finalInner: "最終モデルの内側の分割" } as const;
 
 const fmt = (v: number | null) => (v === null ? null : Number(v.toFixed(6)));
 
@@ -392,7 +435,7 @@ export const P4_PIPELINE: Skill = {
         if ("error" in pr) return { summary: {}, warnings: [], errors: [pr.error] };
         const c = await buildCohort(d, pr);
         if ("error" in c) return { summary: {}, warnings: [], errors: [c.error] };
-        ctx.state.p4 = { params: pr, cohort: c, split: null, qc: null, names: [], X: [], spec: null, cv: null, final: null, test: null } satisfies P4State;
+        ctx.state.p4 = { params: pr, cohort: c, split: null, qc: null, names: [], X: [], spec: null, cv: null, final: null, test: null, leak: null } satisfies P4State;
         const left = d.ids.length - c.ids.length;
         const ev = c.task.kind === "binary" ? c.task.y.reduce((a, b) => a + b, 0) : c.task.surv.event.reduce((a, b) => a + b, 0);
         return {
@@ -456,6 +499,9 @@ export const P4_PIPELINE: Skill = {
       title: { ja: "入れ子の交差検証", en: "Nested cross-validation" },
       async run(ctx): Promise<StepOutcome> {
         const st = ctx.state.p4 as P4State;
+        const trace = new RowTrace();
+        st.spec!.trace = trace;
+        if (st.qc!.usedRows.length) trace.note("qc", st.qc!.usedRows);
         const cv = await nestedCv(st.X, st.cohort.task, st.qc!.dev, st.spec!, ctx.rng, ctx.tick);
         st.cv = cv;
         const failed = cv.folds.filter((f) => f.score === null).length;
@@ -496,6 +542,35 @@ export const P4_PIPELINE: Skill = {
       },
     },
     {
+      id: "p4-leak",
+      title: { ja: "データリークの検査（分割と前処理）", en: "Data leakage check (splits and preprocessing)" },
+      run(ctx): StepOutcome {
+        const st = ctx.state.p4 as P4State;
+        const ids = st.cohort.ids;
+        const split = checkPatientSplit(
+          { outerK: st.spec!.outerK, innerK: st.spec!.innerK, outerAssign: st.cv!.outerAssign, innerAssign: st.cv!.innerAssign },
+          st.qc!.dev.map((i) => ids[i]), (st.split?.test ?? []).map((i) => ids[i]),
+        );
+        const rowUse = checkRowUse(st.spec!.trace!);
+        st.leak = { split, rowUse };
+        const warnings: string[] = [];
+        if (!split.ok) warnings.push(`同じ患者が訓練と検証に分かれています: ${split.patients.slice(0, 5).join(", ")}${split.patients.length > 5 ? " …" : ""}`);
+        for (const f of rowUse.findings.filter((x) => x.violating > 0)) {
+          warnings.push(f.usesOutcome
+            ? `目的変数を使う処理が訓練側でない行を使っています: ${f.stage}（${WHERE_JA[f.where]}、${f.violating}/${f.entries} 件）`
+            : `教師なしの処理が訓練側でない行の値を読んでいます（結果ラベルは使っていません）: ${f.stage}（${WHERE_JA[f.where]}、${f.violating}/${f.entries} 件）`);
+        }
+        return {
+          summary: {
+            splitCheck: split.ok ? "OK" : "NG", splitChecked: split.checked, splitPatients: split.patients.join(", ") || null,
+            rowUseCheck: rowUse.level === "ok" ? "OK" : rowUse.level === "notice" ? "NOTICE" : "NG",
+            rowUseFindings: rowUse.findings.map((f) => `${f.stage}@${f.where}:${f.violating}/${f.entries}`).join(" ") || null,
+          },
+          warnings,
+        };
+      },
+    },
+    {
       id: "p4-test",
       title: { ja: "テスト集合での評価", en: "Evaluation on the test set" },
       async run(ctx): Promise<StepOutcome> {
@@ -523,6 +598,8 @@ export interface R5State {
   ids: string[];
   names: string[];
   model: R5Model | null;
+  /** LASSO の交差検証の分割の検査（LASSO で絞り込んだときだけ）。ブートストラップは元の標本で評価する方式で、分割ではない。 */
+  split: SplitCheck | null;
 }
 
 export const R5_MODEL: Skill = {
@@ -550,7 +627,7 @@ export const R5_MODEL: Skill = {
         if ("error" in pr) return { summary: {}, warnings: [], errors: [pr.error] };
         const cohort = survivalCohort(d);
         if ("error" in cohort) return { summary: {}, warnings: [], errors: [cohort.error] };
-        ctx.state.r5 = { params: pr, cohort, ids: cohort.patients.map((i) => d.ids[i]), names: d.featureNames, model: null } satisfies R5State;
+        ctx.state.r5 = { params: pr, cohort, ids: cohort.patients.map((i) => d.ids[i]), names: d.featureNames, model: null, split: null } satisfies R5State;
         const events = cohort.surv.event.reduce((a, b) => a + b, 0);
         const warnings: string[] = [];
         if (d.ids.length - cohort.patients.length > 0) warnings.push(`時間かイベントが欠けている患者 ${d.ids.length - cohort.patients.length} 人を除きました`);
@@ -569,6 +646,9 @@ export const R5_MODEL: Skill = {
         if ("error" in m) return { summary: {}, warnings: [], errors: [m.error] };
         st.model = m;
         const r = m.result;
+        const foldOf = r.lasso?.foldOf;
+        if (foldOf) st.split = checkPatientSplit({ outerK: st.params.lassoFolds, innerK: 0, outerAssign: [foldOf], innerAssign: [] }, st.ids);
+        const splitWarn = st.split && !st.split.ok ? [`同じ患者が LASSO の訓練と検証に分かれています: ${st.split.patients.slice(0, 5).join(", ")}`] : [];
         const nm = (cols: number[]) => cols.map((j) => st.names[j]).join(", ");
         return {
           summary: {
@@ -579,8 +659,9 @@ export const R5_MODEL: Skill = {
             cIndexApparent: m.cApparent, cIndexCorrected: m.corrected?.corrected ?? null, optimism: m.corrected?.optimism ?? null,
             bootstraps: m.corrected?.bootstraps ?? null, bootstrapFailed: m.corrected?.failed ?? null,
             phGlobalP: m.schoenfeld?.global.p ?? null,
+            splitCheck: st.split ? (st.split.ok ? "OK" : "NG") : null, splitPatients: st.split?.patients.join(", ") || null,
           },
-          warnings: m.notes,
+          warnings: [...m.notes, ...splitWarn],
         };
       },
     },

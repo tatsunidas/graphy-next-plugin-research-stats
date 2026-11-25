@@ -1,5 +1,6 @@
 import { rocPoints } from "../core/discrim/roc";
 import { calibrationBins } from "../core/discrim/calibration";
+import type { RowUseCheck, SplitCheck } from "../core/leak";
 import type { P4State } from "../core/skills";
 import { h } from "./dom";
 import type { Key } from "./i18n";
@@ -21,6 +22,19 @@ function importanceChart(items: { n: string; v: number }[], t: T): HTMLElement {
 }
 
 /** P4 の結果: 人数、外側の分割ごとの評価（表と図）、束ねた ROC・較正、選ばれた回数、最終モデル、テスト集合の評価。 */
+/** データリークの検査（分割・前処理の行）。 */
+export function leakView(split: SplitCheck, rowUse: RowUseCheck | null, t: T, testId: string): HTMLElement {
+  const stage: Record<string, Key> = { qc: "leakStageQc", impute: "leakStageImpute", rank: "leakStageRank", fit: "leakStageFit" };
+  const where: Record<string, Key> = { pre: "leakWherePre", fold: "leakWhereFold", inner: "leakWhereInner", final: "leakWhereFinal", finalInner: "leakWhereFinalInner" };
+  const bad = rowUse?.findings.filter((f) => f.violating > 0) ?? [];
+  return h("div", { "data-testid": testId },
+    h("h3", {}, t("leakTitle")),
+    h("div", { class: split.ok ? "rs-note" : "rs-err", "data-testid": `${testId}-split` }, split.ok ? t("leakSplitOk", { n: split.checked }) : t("leakSplitNg", { ids: split.patients.slice(0, 10).join(", ") })),
+    rowUse ? h("div", { class: rowUse.level === "ok" ? "rs-note" : "rs-warn", "data-testid": `${testId}-rows`, "data-level": rowUse.level }, t(rowUse.level === "ok" ? "leakRowOk" : rowUse.level === "notice" ? "leakRowNotice" : "leakRowNg"),
+      bad.length ? h("ul", {}, ...bad.map((f) => h("li", {}, t(f.usesOutcome ? "leakRowLine" : "leakRowLineFree", { stage: t(stage[f.stage]), where: t(where[f.where]), v: f.violating, n: f.entries, m: f.maxOutside })))) : null,
+      bad.some((f) => f.stage === "qc") ? h("div", { class: "rs-note" }, t("leakQcNote")) : null) : null);
+}
+
 export function p4Panel(st: P4State, t: T): HTMLElement {
   const bin = st.cohort.task.kind === "binary";
   const metric = bin ? "AUC" : "C-index";
@@ -101,5 +115,5 @@ export function p4Panel(st: P4State, t: T): HTMLElement {
     lockInfo, sizes,
     qc ? list(t("p4Removed"), qc.removed.map((r) => `${r.feature}: ${r.reason}`), "rs-p4-removed") : null,
     qc ? list(t("p4Dropped"), qc.droppedDev, "rs-p4-dropped") : null,
-    cvView, finalView, testView);
+    cvView, finalView, st.leak ? leakView(st.leak.split, st.leak.rowUse, t, "rs-p4-leak") : null, testView);
 }
