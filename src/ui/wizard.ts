@@ -4,7 +4,9 @@ import { datasetCsv } from "../core/exportDataset";
 import { defaultFeatureColumns, type Dataset, type JoinReport, type TableSource } from "../core/dataset";
 import { runSkill, type RunRecord } from "../core/engine";
 import { kmPointsCsv, r1ResultsCsv } from "../core/exportR1";
+import { assignPair, joinNotes, suggestJoin, type JoinNote, type PairOverlap } from "../core/joinQc";
 import { methodText } from "../core/methodText";
+import { covariateQc, eventQc, outcomeQc, rolesForSkill, sanitizeRoles, timeQc } from "../core/roleQc";
 import type { Locale, ParamValue, Skill } from "../core/skill";
 import { DATASET_CHECK, P4_PIPELINE, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, R5_MODEL, type P4State, type R1State, type R2State, type R3State, type R5State } from "../core/skills";
 import { R5_DEFAULTS } from "../core/r5";
@@ -30,6 +32,23 @@ import { CSS } from "./style";
 declare const __PLUGIN_VERSION__: string;
 const VERSION = typeof __PLUGIN_VERSION__ === "string" ? __PLUGIN_VERSION__ : "dev";
 
+/** 解析の種類の選択肢（データセットの確認は解析の種類ではなく、手前の区画）。 */
+const SKILLS: Skill[] = [R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE, R5_MODEL];
+const SKILL_LABEL: Record<string, Key> = { [R1_PROGNOSIS.id]: "skillR1", [R2_DISCRIMINATION.id]: "skillR2", [R3_REPRODUCIBILITY.id]: "skillR3", [P4_PIPELINE.id]: "skillP4", [R5_MODEL.id]: "skillR5" };
+const LIST_LIMIT = 50;
+
+interface CheckState {
+  status: "idle" | "running" | "done";
+  ok: boolean;
+  errors: string[];
+  report: JoinReport | null;
+  dataset: Dataset | null;
+  record: RunRecord | null;
+  notes: JoinNote[];
+}
+
+const IDLE: CheckState = { status: "idle", ok: false, errors: [], report: null, dataset: null, record: null, notes: [] };
+
 interface State {
   features: TableSource[];
   clinical: TableSource | null;
@@ -42,7 +61,13 @@ interface State {
   params: Record<string, ParamValue>;
   seed: number;
   noSha: boolean;
-  skill: Skill;
+  skill: Skill | null;
+  /** データセットの確認（解析の種類によらない）。 */
+  check: CheckState;
+  /** 特徴量の表の列 × 臨床の表の列の重なり（重なりが大きい順）。 */
+  pairs: PairOverlap[];
+  /** 開いている <details>（描き直しても閉じない）。 */
+  open: Set<string>;
   progress: { label: string; fraction: number } | null;
   cancelled: boolean;
   selectedFeature: string | null;
@@ -56,55 +81,48 @@ async function readSource(file: File): Promise<TableSource> {
   return { name: file.name, sha256, table: parseCsv(new TextDecoder("utf-8").decode(bytes)) };
 }
 
+interface Section {
+  id: string;
+  title: string;
+  body: (Node | null)[];
+  /** 前の区画が済んでいないとき、その理由。 */
+  reason?: string | null;
+}
+
 /** 研究統計のウィンドウの中身を組み立てる。 */
 export function mountWizard(root: HTMLElement, locale: Locale): void {
   const t = makeT(locale);
-  const s: State = { features: [], clinical: null, baseline: [], followup: [], exclusion: null, lock: null, errors: [], params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS, ...R3_DEFAULTS, ...P4_DEFAULTS, ...R5_DEFAULTS }, seed: 1, noSha: false, skill: DATASET_CHECK, progress: null, cancelled: false, selectedFeature: null, ba: { feature: null, a: 0, b: 1 }, result: null };
+  const s: State = {
+    features: [], clinical: null, baseline: [], followup: [], exclusion: null, lock: null, errors: [],
+    params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS, ...R3_DEFAULTS, ...P4_DEFAULTS, ...R5_DEFAULTS },
+    seed: 1, noSha: false, skill: null, check: IDLE, pairs: [], open: new Set(), progress: null, cancelled: false, selectedFeature: null,
+    ba: { feature: null, a: 0, b: 1 }, result: null,
+  };
   root.replaceChildren();
   const wrap = h("div", { class: "rs-root", "data-testid": "rs-root" });
   root.append(h("style", {}, CSS), wrap);
 
+  const isR3 = () => s.skill?.id === R3_REPRODUCIBILITY.id;
+
   const render = () => {
-    const isR3 = s.skill.id === R3_REPRODUCIBILITY.id, isP4 = s.skill.id === P4_PIPELINE.id;
-    const canRun = isR3 ? s.features.length >= 2 : !!(s.features.length && s.clinical);
-    const items: (Node | null)[] = [
+    const r3 = isR3();
+    // 前処理の区画（段 B3）は、③ と ④ の間に挿す
+    const sections: (Section | null)[] = [filesSection(), checkSection(), skillSection(), runSection(r3), s.result ? resultSection(s.result) : null];
+    let n = 0;
+    wrap.replaceChildren(
       h("div", { class: "rs-banner", "data-testid": "rs-banner" }, t("banner")),
-      h("h2", {}, t("step1")),
-      fileRow("rs-file-features", isR3 ? t("condFiles") : t("featFiles"), true, async (fs) => { s.features = await load(fs); }),
-      isR3 ? null : fileRow("rs-file-clinical", t("clinFile"), false, async (fs) => { s.clinical = (await load(fs))[0] ?? null; }),
-      isR3 ? null : fileRow("rs-file-baseline", t("baseFiles"), true, async (fs) => { s.baseline = await load(fs); }),
-      isR3 ? null : fileRow("rs-file-followup", t("followFiles"), true, async (fs) => { s.followup = await load(fs); }),
-      isP4 ? fileRow("rs-file-exclusion", t("exclFile"), false, async (fs) => { s.exclusion = (await load(fs))[0] ?? null; }) : null,
-      isP4 && s.params.lockMode === "use" ? fileRow("rs-file-lock", t("lockFile"), false, async (fs) => {
-        const f = fs[0];
-        s.lock = f ? { name: f.name, text: await f.text() } : null;
-        s.result = null;
-      }, ".json,application/json") : null,
-      isP4 && s.lock && s.params.lockMode === "use" ? h("div", { class: "rs-note", "data-testid": "rs-lock-loaded" }, s.lock.name) : null,
-      ...s.errors.map((e) => h("div", { class: "rs-err", "data-testid": "rs-read-error" }, e)),
-      ...loadedNotes(),
-      s.noSha ? h("div", { class: "rs-note" }, t("sha")) : null,
-      h("h2", {}, t("step2")),
-      isR3 ? r3Mapping() : mapping(),
-      skillControls(),
-      h("div", { class: "rs-row" },
-        h("label", {}, t("seed")),
-        h("input", { type: "number", min: 0, step: 1, value: s.seed, "data-testid": "rs-seed", onchange: (e: Event) => { s.seed = Math.max(0, Math.floor(Number((e.target as HTMLInputElement).value) || 0)); } }),
-      ),
-      h("div", { class: "rs-row" },
-        h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: !canRun || s.progress !== null, onclick: () => run(false) }, s.skill.id === DATASET_CHECK.id ? t("run") : t("runR1")),
-        s.progress !== null ? h("button", { "data-testid": "rs-cancel", onclick: () => { s.cancelled = true; } }, t("cancel")) : null,
-        !canRun ? h("span", { class: "rs-note" }, t("pickFirst")) : null,
-      ),
-      s.progress !== null
-        ? h("div", { "data-testid": "rs-progress" },
-          h("div", { class: "rs-note" }, t("running", { label: s.progress.label, pct: Math.round(s.progress.fraction * 100) })),
-          h("div", { class: "rs-progress" }, h("div", { style: `width:${Math.round(s.progress.fraction * 100)}%` })))
-        : null,
-      s.result ? resultView(s.result) : null,
-    ];
-    wrap.replaceChildren(...items.filter((x): x is Node => x !== null));
+      ...sections.filter((x): x is Section => x !== null).map((x) => {
+        const numbered = x.id !== "result";
+        if (numbered) n++;
+        return h("section", { class: `rs-card${x.reason ? " rs-off" : ""}`, "data-testid": `rs-sec-${x.id}` },
+          h("h2", {}, numbered ? h("span", { class: "rs-num" }, String(n)) : null, x.title),
+          x.reason ? h("div", { class: "rs-reason", "data-testid": `rs-reason-${x.id}` }, x.reason) : null,
+          ...x.body);
+      }),
+    );
   };
+
+  // ① ファイル ------------------------------------------------------------------------------
 
   async function load(files: File[]): Promise<TableSource[]> {
     const out: TableSource[] = [];
@@ -119,87 +137,349 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         s.errors.push(`${f.name}: ${t("readError", { name: f.name, reason })}`);
       }
     }
-    s.result = null;
-    // 読み直したら列の割り当ての候補も作り直す
     return out;
   }
 
-  const loadedNotes = () =>
-    [...s.features, ...(s.clinical ? [s.clinical] : []), ...s.baseline, ...s.followup].map((x) =>
-      h("div", { class: "rs-note", "data-testid": "rs-loaded" }, t("loaded", { name: x.name, rows: x.table.rows.length, cols: x.table.header.length })));
-
-  function fileRow(testId: string, label: string, multiple: boolean, onFiles: (fs: File[]) => Promise<void>, accept = ".csv,text/csv"): HTMLElement {
+  /** 選んだファイルの一覧は状態から描く（描き直しても残る）。隠した input を起動するボタンと、1 件ずつの取り消し。 */
+  function fileBlock(o: {
+    testId: string; label: string; multiple: boolean; accept?: string;
+    items: { name: string; info?: string; testId?: string }[];
+    onAdd: (fs: File[]) => Promise<void>; onRemove: (i: number) => void;
+  }): HTMLElement {
+    const input = h("input", {
+      type: "file", accept: o.accept ?? ".csv,text/csv", multiple: o.multiple, style: "display:none", "data-testid": o.testId,
+      onchange: async (e: Event) => { await o.onAdd(Array.from((e.target as HTMLInputElement).files ?? [])); },
+    });
     return h("div", { class: "rs-row" },
-      h("label", {}, label),
-      h("input", {
-        type: "file", accept, multiple, "data-testid": testId,
-        onchange: async (e: Event) => {
-          const fs = Array.from((e.target as HTMLInputElement).files ?? []);
-          await onFiles(fs);
-          if (accept.includes(".csv") && testId !== "rs-file-exclusion") applySuggestions();
-          render();
-        },
-      }),
+      h("label", {}, o.label),
+      h("div", { class: "rs-field" },
+        h("div", { class: "rs-actions" },
+          h("button", { type: "button", "data-testid": `${o.testId}-pick`, onclick: () => input.click() }, o.items.length ? (o.multiple ? t("addFile") : t("changeFile")) : t("pickFile")),
+          input),
+        o.items.length
+          ? h("ul", { class: "rs-files" }, ...o.items.map((it, i) =>
+            h("li", { "data-testid": it.testId ?? "rs-loaded" },
+              h("span", { class: "rs-fname" }, it.name), it.info ? h("span", { class: "rs-note" }, ` ${it.info}`) : null,
+              h("button", { type: "button", class: "rs-x", title: t("removeFile"), "aria-label": t("removeFile"), "data-testid": `${o.testId}-remove-${i}`, onclick: () => o.onRemove(i) }, "×"))))
+          : h("div", { class: "rs-note" }, t("noFile")),
+      ),
     );
   }
 
-  function applySuggestions() {
-    const sug = suggestColumns(s.features[0]?.table ?? null, s.clinical?.table ?? null);
-    s.params = {
-      ...s.params,
-      featureIdColumn: sug.featureId || null,
-      patientColumn: sug.patient,
-      clinicalIdColumn: sug.clinicalId || null,
-      timeColumn: sug.time,
-      eventColumn: sug.event,
-      outcomeColumn: sug.outcome,
-      reliabilityIdColumn: sug.featureId || null,
-      covariates: [],
+  const tableItems = (xs: TableSource[]) => xs.map((x) => ({ name: x.name, info: t("tableInfo", { rows: x.table.rows.length, cols: x.table.header.length }) }));
+
+  function filesChanged() {
+    s.result = null;
+    s.selectedFeature = null;
+    applyJoinSuggestion();
+    void recomputeCheck();
+    render();
+  }
+
+  function filesSection(): Section {
+    const r3 = isR3();
+    const dropErrors = (name: string) => { s.errors = s.errors.filter((e) => !e.startsWith(`${name}:`)); };
+    const list = (key: "features" | "baseline" | "followup") => ({
+      items: tableItems(s[key]),
+      onAdd: async (fs: File[]) => { s[key] = [...s[key], ...(await load(fs))]; filesChanged(); },
+      onRemove: (i: number) => { dropErrors(s[key][i].name); s[key] = s[key].filter((_, k) => k !== i); filesChanged(); },
+    });
+    return {
+      id: "files", title: t("secFiles"),
+      body: [
+        fileBlock({ testId: "rs-file-features", label: r3 ? t("condFiles") : t("featFiles"), multiple: true, ...list("features") }),
+        fileBlock({
+          testId: "rs-file-clinical", label: r3 ? t("clinFileNotR3") : t("clinFile"), multiple: false, items: s.clinical ? tableItems([s.clinical]) : [],
+          onAdd: async (fs) => { const c = (await load(fs))[0]; if (c) { s.clinical = c; applyRoleSuggestion(); } filesChanged(); },
+          onRemove: () => { if (s.clinical) dropErrors(s.clinical.name); s.clinical = null; applyRoleSuggestion(); filesChanged(); },
+        }),
+        r3 ? null : fileBlock({ testId: "rs-file-baseline", label: t("baseFiles"), multiple: true, ...list("baseline") }),
+        r3 ? null : fileBlock({ testId: "rs-file-followup", label: t("followFiles"), multiple: true, ...list("followup") }),
+        ...s.errors.map((e) => h("div", { class: "rs-err", "data-testid": "rs-read-error" }, e)),
+        s.noSha ? h("div", { class: "rs-note" }, t("sha")) : null,
+      ],
     };
   }
 
-  function select(testId: string, label: string, options: string[], value: string | null, allowNone: string | null, onPick: (v: string | null) => void): HTMLElement {
+  /** ID の列を、実際の値の重なりから決める（同点のときだけ列名の推測）。 */
+  function applyJoinSuggestion() {
+    const tables = s.features.map((f) => f.table);
+    const hint = suggestColumns(tables[0] ?? null, s.clinical?.table ?? null);
+    let featureId = hint.featureId || null, patient = hint.patient, clinicalId = hint.clinicalId || null;
+    s.pairs = [];
+    if (tables.length && s.clinical) {
+      const sj = suggestJoin(tables, s.clinical.table, hint);
+      s.pairs = sj.pairs;
+      featureId = sj.featureId || null;
+      patient = sj.patient;
+      clinicalId = sj.clinicalId || null;
+    }
+    s.params = { ...s.params, featureIdColumn: featureId, patientColumn: patient, clinicalIdColumn: clinicalId, reliabilityIdColumn: hint.featureId || null };
+  }
+
+  /** 臨床の表を読み直したときの、目的変数の列の初期値（列名からの推測。選び直せる）。 */
+  function applyRoleSuggestion() {
+    const sug = suggestColumns(s.features[0]?.table ?? null, s.clinical?.table ?? null);
+    s.params = { ...s.params, timeColumn: s.clinical ? sug.time : null, eventColumn: s.clinical ? sug.event : null, outcomeColumn: s.clinical ? sug.outcome : null, covariates: [], positiveLabel: null };
+  }
+
+  // ② データセットの確認 ---------------------------------------------------------------------
+
+  let checkToken = 0;
+  /** 結合を解析の種類と無関係に実行する（役割の列は渡さない）。 */
+  async function recomputeCheck() {
+    const token = ++checkToken;
+    const p = s.params;
+    if (isR3() || !s.features.length || !s.clinical || !p.featureIdColumn || !p.clinicalIdColumn) {
+      s.check = IDLE;
+      return;
+    }
+    s.check = { ...IDLE, status: "running" };
+    const params: Record<string, ParamValue> = {};
+    for (const k of Object.keys(DATASET_CHECK.defaults)) params[k] = p[k];
+    Object.assign(params, { timeColumn: null, eventColumn: null, outcomeColumn: null, covariates: [] });
+    const { record, state } = await runSkill(
+      DATASET_CHECK,
+      { features: s.features, clinical: s.clinical, baseline: s.baseline, followup: s.followup },
+      params,
+      { seed: s.seed, pluginVersion: VERSION, now: () => new Date().toISOString() },
+    );
+    if (token !== checkToken) return;
+    const report = (state.report as JoinReport | undefined) ?? null;
+    const dataset = (state.dataset as Dataset | undefined) ?? null;
+    const key = (p.patientColumn as string | null) ?? (p.featureIdColumn as string);
+    s.check = {
+      status: "done", ok: record.status === "ok" && !!report && report.joined > 0,
+      errors: record.steps.flatMap((x) => x.errors), report, dataset, record,
+      notes: joinNotes({
+        features: s.features.map((f) => f.table), clinical: s.clinical!.table, featureKey: key, clinicalKey: p.clinicalIdColumn as string,
+        featureId: p.featureIdColumn as string, pairs: s.pairs, featureOnly: report?.featureOnly ?? [], clinicalOnly: report?.clinicalOnly ?? [],
+      }),
+    };
+    render();
+  }
+
+  function select(testId: string, label: string, options: string[], value: string | null, allowNone: string | null, onPick: (v: string | null) => void, extra: HTMLElement | null = null): HTMLElement {
     const sel = h("select", { "data-testid": testId, onchange: (e: Event) => onPick((e.target as HTMLSelectElement).value || null) },
       allowNone !== null ? h("option", { value: "" }, allowNone) : null,
       ...options.map((o) => h("option", { value: o, selected: o === value }, o)),
     );
     sel.value = value ?? "";
-    return h("div", { class: "rs-row" }, h("label", {}, label), sel);
+    return h("div", { class: "rs-row" }, h("label", {}, label), extra ? h("div", { class: "rs-field" }, sel, extra) : sel);
   }
 
-  function mapping(): HTMLElement {
+  const pairLabel = (p: PairOverlap) => `${p.featureColumn} × ${p.clinicalColumn}`;
+
+  function noteView(n: JoinNote): HTMLElement {
+    switch (n.kind) {
+      case "noOverlap":
+        return h("div", { class: "rs-err", "data-testid": "rs-note-no-overlap" }, t("noteNoOverlap", { pairs: n.pairs.map((p) => `${pairLabel(p)}（${p.normalized}）`).join(" ／ ") }));
+      case "betterPair":
+        return h("div", { class: "rs-warn", "data-testid": "rs-note-better-pair" }, t("noteBetter", { used: n.used ? `${pairLabel(n.used)}: ${n.used.normalized}` : t("noteUsedNone"), better: pairLabel(n.better), n: n.better.normalized }));
+      case "variants":
+        return h("div", { class: "rs-warn", "data-testid": "rs-note-variants" }, t("noteVariants", { n: n.items.length, ex: n.items.slice(0, 3).map((x) => `${x.feature} ↔ ${x.clinical}`).join(", ") }));
+      case "sharedColumns":
+        return h("div", { class: "rs-warn", "data-testid": "rs-note-shared" }, t("noteShared", { cols: n.columns.slice(0, 8).join(", ") + (n.columns.length > 8 ? " …" : "") }));
+    }
+  }
+
+  function pairsTable(): HTMLElement | null {
+    const usedKey = (s.params.patientColumn as string | null) ?? (s.params.featureIdColumn as string | null);
+    const rows = s.pairs.slice(0, 5);
+    if (!rows.length) return null;
+    return h("div", { class: "rs-tablewrap", "data-testid": "rs-pairs" },
+      h("table", { class: "rs-table" },
+        h("thead", {}, h("tr", {}, h("th", {}, t("thFeatCol")), h("th", {}, t("thClinCol")), h("th", {}, t("thOverlap")), h("th", {}, t("thExact")), h("th", {}))),
+        h("tbody", {}, ...rows.map((p) => {
+          const inUse = p.featureColumn === usedKey && p.clinicalColumn === s.params.clinicalIdColumn;
+          return h("tr", {},
+            h("td", {}, p.featureColumn), h("td", {}, p.clinicalColumn), h("td", {}, `${p.normalized} / ${Math.min(p.featureDistinct, p.clinicalDistinct)}`), h("td", {}, String(p.exact)),
+            h("td", {}, inUse ? h("span", { class: "rs-tag" }, t("inUse")) : h("button", { type: "button", onclick: () => {
+              const a = assignPair(s.features.map((f) => f.table), p, (s.params.featureIdColumn as string) ?? "");
+              s.params = { ...s.params, featureIdColumn: a.featureId || null, patientColumn: a.patient, clinicalIdColumn: p.clinicalColumn };
+              s.result = null;
+              void recomputeCheck();
+              render();
+            } }, t("usePair"))));
+        }))));
+  }
+
+  function idList(title: string, xs: string[], testId: string): HTMLElement | null {
+    if (!xs.length) return null;
+    const shown = xs.slice(0, LIST_LIMIT);
+    return h("details", { "data-testid": testId, open: s.open.has(testId), ontoggle: toggled(testId) },
+      h("summary", {}, `${title}（${xs.length}）`),
+      h("ul", {}, ...shown.map((x) => h("li", {}, x)), xs.length > shown.length ? h("li", { class: "rs-note" }, t("andMore", { n: xs.length - shown.length })) : null));
+  }
+
+  const toggled = (id: string) => (e: Event) => {
+    if ((e.target as HTMLDetailsElement).open) s.open.add(id);
+    else s.open.delete(id);
+  };
+
+  function exportButtons(): HTMLElement | null {
+    const c = s.check;
+    if (!c.dataset || !c.record) return null;
+    const { dataset, record } = c;
+    return h("div", { class: "rs-actions" },
+      h("button", { type: "button", "data-testid": "rs-check-save-data", onclick: () => download(datasetCsv(dataset, (s.params.clinicalIdColumn as string) ?? "ID"), "research-stats-dataset.csv", "text/csv;charset=utf-8") }, t("saveDataCheck")),
+      h("button", { type: "button", "data-testid": "rs-check-save-method", onclick: () => download(methodText(record, DATASET_CHECK, locale), "research-stats-method.txt", "text/plain;charset=utf-8") }, t("saveMethod")),
+      h("button", { type: "button", "data-testid": "rs-check-save-record", onclick: () => download(`${JSON.stringify(record, null, 2)}\n`, "research-stats-record.json", "application/json") }, t("saveRecord")));
+  }
+
+  function checkSection(): Section {
+    const title = t("secCheck");
     const fh = s.features[0]?.table.header ?? [];
-    const ch = s.clinical?.table.header ?? [];
+    if (isR3()) {
+      if (!s.features.length) return { id: "check", title, body: [], reason: t("reasonFeatures") };
+      return { id: "check", title, body: [select("rs-r3-id", t("condId"), fh, s.params.reliabilityIdColumn as string | null, null, (v) => { s.params = { ...s.params, reliabilityIdColumn: v }; s.result = null; render(); })] };
+    }
+    if (!s.features.length || !s.clinical) return { id: "check", title, body: [], reason: t("reasonBothFiles") };
+    const ch = s.clinical.table.header;
     const p = s.params;
-    const set = (k: string) => (v: string | null) => { s.params = { ...s.params, [k]: v }; s.result = null; render(); };
-    const cols = s.features.length
-      ? defaultFeatureColumns({ header: fh, rows: s.features.flatMap((x) => x.table.rows) }, [p.featureIdColumn as string | null, p.patientColumn as string | null])
-      : [];
-    const cov = (p.covariates as string[]) ?? [];
-    const used = [p.clinicalIdColumn, p.timeColumn, p.eventColumn, p.outcomeColumn].filter(Boolean) as string[];
-    return h("div", {},
+    const set = (k: string) => (v: string | null) => { s.params = { ...s.params, [k]: v }; s.result = null; void recomputeCheck(); render(); };
+    const cols = defaultFeatureColumns({ header: fh, rows: s.features.flatMap((x) => x.table.rows) }, [p.featureIdColumn as string | null, p.patientColumn as string | null]);
+    const c = s.check;
+    const rep = c.report;
+    const best = s.pairs[0];
+    const body: (Node | null)[] = [
       select("rs-feature-id", t("featureId"), fh, p.featureIdColumn as string | null, null, set("featureIdColumn")),
       select("rs-patient", t("patient"), fh.filter((x) => x !== p.featureIdColumn), p.patientColumn as string | null, t("patientNone"), set("patientColumn")),
       select("rs-clinical-id", t("clinicalId"), ch, p.clinicalIdColumn as string | null, null, set("clinicalIdColumn")),
-      select("rs-time", t("time"), ch.filter((x) => x !== p.clinicalIdColumn), p.timeColumn as string | null, t("none"), set("timeColumn")),
-      select("rs-event", t("event"), ch.filter((x) => x !== p.clinicalIdColumn), p.eventColumn as string | null, t("none"), set("eventColumn")),
-      select("rs-outcome", t("outcome"), ch.filter((x) => x !== p.clinicalIdColumn), p.outcomeColumn as string | null, t("none"), set("outcomeColumn")),
-      h("div", { class: "rs-row" },
+      s.baseline.length && s.followup.length ? select("rs-delta-order", t("deltaOrder"), ["lesion-then-mean", "mean-then-change"], p.deltaOrder as string, null, set("deltaOrder")) : null,
+      best && best.normalized > 0
+        ? h("div", { class: "rs-note", "data-testid": "rs-best-pair" }, t("bestPair", { f: best.featureColumn, c: best.clinicalColumn, n: best.normalized }))
+        : null,
+      pairsTable(),
+      h("div", { class: "rs-note", "data-testid": "rs-feature-count" }, t("featureCount", { n: cols.length })),
+    ];
+    if (c.status === "running") body.push(h("div", { class: "rs-note", "data-testid": "rs-check-running" }, t("checkRunning")));
+    if (c.status === "done") {
+      body.push(
+        ...c.notes.map(noteView),
+        c.errors.length ? h("div", { class: "rs-err", "data-testid": "rs-check-errors" }, h("b", {}, t("errors")), h("ul", {}, ...c.errors.map((e) => h("li", {}, e)))) : null,
+        rep && rep.warnings.length ? h("div", { class: "rs-warn", "data-testid": "rs-check-warnings" }, h("ul", {}, ...rep.warnings.map((e) => h("li", {}, e)))) : null,
+        rep && rep.joined === 0 ? h("div", { class: "rs-err", "data-testid": "rs-zero-joined" }, t("zeroJoined")) : null,
+      );
+      if (rep) {
+        body.push(
+          h("div", { class: "rs-big", "data-testid": "rs-joined" }, t("joined", { n: rep.joined })),
+          h("div", { "data-testid": "rs-counts" }, t("counts", { rows: rep.featureRows, pf: rep.patientsInFeatures, pc: rep.patientsInClinical, fo: rep.featureOnly.length, co: rep.clinicalOnly.length })),
+          rep.lesionsPerPatient ? h("div", { class: "rs-note" }, t("lesions", rep.lesionsPerPatient)) : null,
+          idList(t("featureOnly"), rep.featureOnly, "rs-feature-only"),
+          idList(t("clinicalOnly"), rep.clinicalOnly, "rs-clinical-only"),
+          rep.missing.length
+            ? h("details", { "data-testid": "rs-missing", open: s.open.has("rs-missing"), ontoggle: toggled("rs-missing") }, h("summary", {}, `${t("missing")}（${rep.missing.length}）`), h("ul", {}, ...rep.missing.map((m) => h("li", {}, t("missingRow", { name: m.name, count: m.count, of: m.of })))))
+            : h("div", { class: "rs-note", "data-testid": "rs-no-missing" }, t("noMissing")),
+          rep.exclusions.length ? idList(t("exclusions"), rep.exclusions.map((x) => `${x.id}: ${x.reason}`), "rs-exclusions") : null,
+        );
+      }
+      if (c.ok) body.push(h("div", { class: "rs-pass", "data-testid": "rs-check-pass" }, t("checkPass")), exportButtons());
+    }
+    return { id: "check", title, body };
+  }
+
+  // ③ 解析の種類と目的変数・設定 --------------------------------------------------------------
+
+  function skillSection(): Section {
+    const sel = h("select", { "data-testid": "rs-skill", onchange: (e: Event) => pick((e.target as HTMLSelectElement).value) },
+      h("option", { value: "" }, t("skillNone")), ...SKILLS.map((k) => h("option", { value: k.id }, t(SKILL_LABEL[k.id]))));
+    sel.value = s.skill?.id ?? "";
+    const pick = (id: string) => {
+      const wasR3 = isR3();
+      s.skill = SKILLS.find((r) => r.id === id) ?? null;
+      s.result = null;
+      s.selectedFeature = null;
+      if (wasR3 !== isR3()) void recomputeCheck();
+      render();
+    };
+    const row = h("div", { class: "rs-row" }, h("label", {}, t("skill")), sel);
+    const ready = isR3() ? s.features.length > 0 : s.check.status === "done" && s.check.ok;
+    const reason = ready ? null : !s.features.length ? t("reasonFeatures") : isR3() ? t("reasonFeatures") : t("reasonCheck");
+    sel.disabled = !ready; // ② を通すまで、解析の種類は選べない（理由は区画の先頭に出る）
+    if (!ready || !s.skill) return { id: "skill", title: t("secSkill"), body: [row], reason };
+    const target = targetRows();
+    const { main, more } = paramControls();
+    return {
+      id: "skill", title: t("secSkill"),
+      body: [
+        row,
+        h("div", { class: "rs-note" }, s.skill.question[locale]),
+        target.length ? h("h3", {}, t("target")) : null, ...target,
+        main.length ? h("h3", {}, t("settings")) : null, ...main,
+        more.length ? h("details", { "data-testid": "rs-params", open: s.open.has("params"), ontoggle: toggled("params") }, h("summary", {}, t("moreParams")), ...more) : null,
+      ],
+    };
+  }
+
+  const qc = (testId: string, text: string, bad: boolean) => h("div", { class: `rs-qc ${bad ? "rs-warn" : "rs-note"}`, "data-testid": testId }, text);
+  const examples = (xs: string[]) => (xs.length ? t("qcExamples", { ex: xs.join(", ") }) : "");
+
+  /** 目的変数は、実際に読んだ臨床の表の見出しから選ぶ。選んだ列の型はその場で検査して出す。 */
+  function targetRows(): HTMLElement[] {
+    const tb = s.clinical?.table;
+    const needs = rolesForSkill(s.skill?.id ?? null, s.params);
+    const p = s.params;
+    const out: HTMLElement[] = [];
+    if (s.skill?.id === P4_PIPELINE.id) out.push(choiceRow("rs-p4-kind", t("p4Kind"), "outcomeKind", [["binary", t("kBinary")], ["survival", t("kSurvival")]], { none: t("choose") }));
+    if (!tb) return out;
+    const ch = tb.header.filter((x) => x !== p.clinicalIdColumn);
+    const col = (k: string) => (p[k] as string | null) && tb.header.includes(p[k] as string) ? (p[k] as string) : null;
+    const set = (k: string) => (v: string | null) => { s.params = { ...s.params, [k]: v, ...(k === "outcomeColumn" ? { positiveLabel: null } : {}) }; s.result = null; render(); };
+    if (needs.time) {
+      const c = col("timeColumn"), q = c ? timeQc(tb, c) : null;
+      out.push(select("rs-time", t("time"), ch, c, t("none"), set("timeColumn"),
+        qc("rs-time-qc", q ? t("qcTime", { rows: q.rows, ok: q.positive, missing: q.missing, bad: q.invalid, ex: examples(q.invalidExamples) }) : t("qcUnset"), !!q && q.invalid > 0)));
+    }
+    if (needs.event) {
+      const c = col("eventColumn"), q = c ? eventQc(tb, c) : null;
+      out.push(select("rs-event", t("event"), ch, c, t("none"), set("eventColumn"),
+        qc("rs-event-qc", q ? t("qcEvent", { zero: q.zero, one: q.one, missing: q.missing, bad: q.invalid, ex: examples(q.invalidExamples) }) : t("qcUnset"), !!q && q.invalid > 0)));
+    }
+    if (needs.outcome) {
+      const c = col("outcomeColumn"), q = c ? outcomeQc(tb, c) : null;
+      const list = q ? q.values.slice(0, 6).map((v) => `${v.label}: ${v.count}`).join(" ／ ") + (q.values.length > 6 ? " …" : "") : "";
+      out.push(select("rs-outcome", t("outcome"), ch, c, t("none"), set("outcomeColumn"),
+        qc("rs-outcome-qc", q ? `${t("qcOutcome", { k: q.values.length, list, missing: q.missing })}${q.binary ? "" : ` — ${t("qcNotBinary", { k: q.values.length })}`}` : t("qcUnset"), !!q && !q.binary)));
+    }
+    if (needs.positive) out.push(positiveRow());
+    if (needs.covariates) {
+      const used = [p.clinicalIdColumn, p.timeColumn, p.eventColumn, p.outcomeColumn].filter(Boolean) as string[];
+      const cov = (p.covariates as string[]) ?? [];
+      out.push(h("div", { class: "rs-row" },
         h("label", {}, t("covariates")),
         h("div", { class: "rs-chips", "data-testid": "rs-covariates" },
-          ...ch.filter((x) => !used.includes(x)).map((c) =>
-            h("label", {}, h("input", { type: "checkbox", checked: cov.includes(c), onchange: (e: Event) => {
+          ...tb.header.filter((x) => !used.includes(x)).map((c) => {
+            const q = covariateQc(tb, c);
+            const note = !q ? "" : q.numeric ? (q.missing ? t("qcCovMissing", { missing: q.missing }) : "") : t("qcCovText", { ex: q.textExamples.join(", ") });
+            return h("label", { class: q && !q.numeric ? "rs-chip-bad" : "" }, h("input", { type: "checkbox", checked: cov.includes(c), onchange: (e: Event) => {
               const on = (e.target as HTMLInputElement).checked;
               s.params = { ...s.params, covariates: on ? [...cov, c] : cov.filter((x) => x !== c) };
               s.result = null;
-            } }), ` ${c}`))),
-      ),
-      s.baseline.length && s.followup.length
-        ? select("rs-delta-order", t("deltaOrder"), ["lesion-then-mean", "mean-then-change"], p.deltaOrder as string, null, set("deltaOrder"))
-        : null,
-      s.features.length ? h("div", { class: "rs-note", "data-testid": "rs-feature-count" }, t("featureCount", { n: cols.length })) : null,
-    );
+              render();
+            } }), ` ${c}`, note ? h("span", { class: "rs-note" }, ` (${note})`) : null);
+          }))));
+    }
+    return out;
   }
+
+  function positiveRow(): HTMLElement {
+    const p = s.params;
+    const labels = outcomeValues();
+    const pos = h("select", { "data-testid": "rs-positive", onchange: (e: Event) => { s.params = { ...s.params, positiveLabel: (e.target as HTMLSelectElement).value || null }; s.result = null; } },
+      h("option", { value: "" }, t("positiveNone")), ...labels.map((l) => h("option", { value: l }, l)));
+    pos.value = typeof p.positiveLabel === "string" && labels.includes(p.positiveLabel) ? p.positiveLabel : "";
+    if (pos.value === "" && p.positiveLabel !== null) s.params = { ...s.params, positiveLabel: null };
+    return h("div", { class: "rs-row" }, h("label", {}, t("positiveLabel")), pos);
+  }
+
+  function choiceRow(testId: string, label: string, key: string, options: [string, string][], o: { none?: string; toValue?: (v: string) => ParamValue } = {}): HTMLElement {
+    const el = h("select", { "data-testid": testId, onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; s.params = { ...s.params, [key]: v === "" ? null : o.toValue ? o.toValue(v) : v }; s.result = null; render(); } },
+      o.none !== undefined ? h("option", { value: "" }, o.none) : null, ...options.map(([v, l]) => h("option", { value: v }, l)));
+    el.value = s.params[key] === null || s.params[key] === undefined ? "" : String(s.params[key]);
+    return h("div", { class: "rs-row" }, h("label", {}, label), el);
+  }
+
 
   function numberRow(testId: string, label: string, key: string, opts: { step?: number; min?: number; max?: number; emptyIsNull?: boolean }): HTMLElement {
     const v = s.params[key];
@@ -226,83 +506,81 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     return [...new Set(tb.rows.map((r) => String(r[j] ?? "").trim()).filter((x) => x !== ""))].sort();
   }
 
-  function r2Controls(): HTMLElement[] {
+  type Controls = { main: HTMLElement[]; more: HTMLElement[] };
+  const compact = (xs: (HTMLElement | null)[]) => xs.filter((x): x is HTMLElement => x !== null);
+
+  function r1Controls(): Controls {
     const p = s.params;
-    const labels = outcomeValues();
-    const pos = h("select", { "data-testid": "rs-positive", onchange: (e: Event) => { s.params = { ...s.params, positiveLabel: (e.target as HTMLSelectElement).value || null }; s.result = null; } },
-      h("option", { value: "" }, t("positiveNone")), ...labels.map((l) => h("option", { value: l }, l)));
-    pos.value = typeof p.positiveLabel === "string" && labels.includes(p.positiveLabel) ? p.positiveLabel : "";
-    if (pos.value === "" && p.positiveLabel !== null) s.params = { ...s.params, positiveLabel: null };
-    const choice = (testId: string, label: string, key: string, options: [string, string][]) => {
-      const el = h("select", { "data-testid": testId, onchange: (e: Event) => { s.params = { ...s.params, [key]: (e.target as HTMLSelectElement).value }; s.result = null; render(); } }, ...options.map(([v, l]) => h("option", { value: v }, l)));
-      el.value = String(p[key]);
-      return h("div", { class: "rs-row" }, h("label", {}, label), el);
-    };
-    const out: HTMLElement[] = [
-      h("div", { class: "rs-row" }, h("label", {}, t("positiveLabel")), pos),
-      choice("rs-criterion", t("criterion"), "criterion", [["accuracy", t("cAccuracy")], ["youden", t("cYouden")]]),
-      choice("rs-multiplicity", t("multiplicity"), "multiplicity", [["bh", t("mBh")], ["none", t("mNone")]]),
+    const main = compact([
+      choiceRow("rs-group-mode", t("groupMode"), "groupMode", [["median", t("gMedian")], ["value", t("gValue")], ["tertile", t("gTertile")], ["optimal", t("gOptimal")]]),
+      p.groupMode === "value" ? numberRow("rs-group-value", t("groupValue"), "groupValue", { emptyIsNull: true }) : null,
+    ]);
+    if (p.groupMode === "optimal") {
+      const m = defaultFeatureColumns({ header: s.features[0]?.table.header ?? [], rows: s.features.flatMap((x) => x.table.rows) }, [p.featureIdColumn as string | null, p.patientColumn as string | null]).length;
+      if (m) main.push(h("div", { class: "rs-note", "data-testid": "rs-heavy" }, t("heavy", { m, b: Number(p.permutations) })));
+    }
+    const more = compact([
+      choiceRow("rs-multiplicity", t("multiplicity"), "multiplicity", [["bh", t("mBh")], ["none", t("mNone")]]),
+      numberRow("rs-alpha", t("alpha"), "alpha", { step: 0.01, min: 0.0001, max: 0.5 }),
+      p.groupMode === "optimal" ? numberRow("rs-min-fraction", t("minFraction"), "minGroupFraction", { step: 0.05, min: 0.01, max: 0.4 }) : null,
+      p.groupMode === "optimal" ? numberRow("rs-permutations", t("permutations"), "permutations", { step: 100, min: 19 }) : null,
+      numberRow("rs-rmst-tau", t("rmstTau"), "rmstTau", { emptyIsNull: true, min: 0 }),
+      h("div", { class: "rs-row" }, h("label", {}, t("mw")), h("input", { type: "checkbox", checked: p.mannWhitney === true, "data-testid": "rs-mw", onchange: (e: Event) => { s.params = { ...s.params, mannWhitney: (e.target as HTMLInputElement).checked }; s.result = null; } })),
+      numberRow("rs-bootstrap", t("bootstrapB"), "bootstrapB", { step: 100, min: 0 }),
+    ]);
+    return { main, more };
+  }
+
+  function r2Controls(): Controls {
+    const p = s.params;
+    const more: HTMLElement[] = [
       numberRow("rs-alpha", t("alpha"), "alpha", { step: 0.01, min: 0.0001, max: 0.5 }),
       numberRow("rs-topk", t("topK"), "topK", { step: 1, min: 2, max: 20 }),
       numberRow("rs-calbins", t("calBins"), "calibrationBins", { step: 1, min: 2, max: 50 }),
       h("div", { class: "rs-row" }, h("label", {}, t("treeOn")), h("input", { type: "checkbox", checked: p.tree === true, "data-testid": "rs-tree-on", onchange: (e: Event) => { s.params = { ...s.params, tree: (e.target as HTMLInputElement).checked }; s.result = null; render(); } })),
     ];
-    if (p.tree === true) out.push(
+    if (p.tree === true) more.push(
       numberRow("rs-tree-stop", t("treeStop"), "treeStopRate", { step: 0.01, min: 0, max: 0.5 }),
       numberRow("rs-tree-min", t("treeMin"), "treeMinNode", { step: 1, min: 2 }),
       numberRow("rs-tree-depth", t("treeDepth"), "treeMaxDepth", { step: 1, min: 1, max: 20 }),
       numberRow("rs-mc", t("mcIter"), "mcIterations", { step: 100, min: 100 }),
     );
-    return out;
+    return {
+      main: [
+        choiceRow("rs-criterion", t("criterion"), "criterion", [["accuracy", t("cAccuracy")], ["youden", t("cYouden")]]),
+        choiceRow("rs-multiplicity", t("multiplicity"), "multiplicity", [["bh", t("mBh")], ["none", t("mNone")]]),
+      ],
+      more,
+    };
   }
 
-  function r3Mapping(): HTMLElement {
-    const fh = s.features[0]?.table.header ?? [];
-    return h("div", {}, select("rs-r3-id", t("condId"), fh, s.params.reliabilityIdColumn as string | null, null, (v) => { s.params = { ...s.params, reliabilityIdColumn: v }; s.result = null; render(); }));
-  }
-
-  function r3Controls(): HTMLElement[] {
+  function r3Controls(): Controls {
     const el = h("select", { "data-testid": "rs-min-category", onchange: (e: Event) => { s.params = { ...s.params, minCategory: (e.target as HTMLSelectElement).value || null }; s.result = null; } },
       h("option", { value: "" }, t("mcNone")), ...["moderate", "good", "excellent"].map((c) => h("option", { value: c }, c)));
     el.value = typeof s.params.minCategory === "string" ? s.params.minCategory : "";
-    return [h("div", { class: "rs-row" }, h("label", {}, t("minCategory")), el)];
+    return { main: [h("div", { class: "rs-row" }, h("label", {}, t("minCategory")), el)], more: [] };
   }
 
-  function p4Controls(): HTMLElement[] {
+  function p4Controls(): Controls {
     const p = s.params;
-    const choice = (testId: string, label: string, key: string, options: [string, string][], toValue: (v: string) => ParamValue = (v) => v) => {
-      const el = h("select", { "data-testid": testId, onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; s.params = { ...s.params, [key]: v === "" ? null : toValue(v) }; s.result = null; render(); } },
-        h("option", { value: "" }, t("choose")), ...options.map(([v, l]) => h("option", { value: v }, l)));
-      el.value = p[key] === null || p[key] === undefined ? "" : String(p[key]);
-      return h("div", { class: "rs-row" }, h("label", {}, label), el);
-    };
-    const out: (HTMLElement | null)[] = [
-      choice("rs-p4-kind", t("p4Kind"), "outcomeKind", [["binary", t("kBinary")], ["survival", t("kSurvival")]]),
-    ];
-    if (p.outcomeKind === "binary") {
-      const labels = outcomeValues();
-      const pos = h("select", { "data-testid": "rs-positive", onchange: (e: Event) => { s.params = { ...s.params, positiveLabel: (e.target as HTMLSelectElement).value || null }; s.result = null; } },
-        h("option", { value: "" }, t("positiveNone")), ...labels.map((l) => h("option", { value: l }, l)));
-      pos.value = typeof p.positiveLabel === "string" && labels.includes(p.positiveLabel) ? p.positiveLabel : "";
-      out.push(h("div", { class: "rs-row" }, h("label", {}, t("positiveLabel")), pos));
-    }
-    if (p.outcomeKind === "survival") {
-      out.push(choice("rs-p4-strat", t("p4Strat"), "stratifySurvival", [["true", t("stratYes")], ["false", t("stratNo")]], (v) => v === "true"));
-      out.push(numberRow("rs-p4-boot", t("p4Boot"), "testBootstrapB", { step: 100, min: 100 }));
-    }
-    out.push(
+    const choice = (testId: string, label: string, key: string, options: [string, string][], toValue?: (v: string) => ParamValue) => choiceRow(testId, label, key, options, { none: t("choose"), toValue });
+    const modelEl = h("select", { "data-testid": "rs-p4-model", onchange: (e: Event) => { s.params = { ...s.params, model: (e.target as HTMLSelectElement).value }; s.result = null; render(); } },
+      h("option", { value: "topk" }, t("mTopk")), h("option", { value: "lasso" }, t("mLasso")),
+      h("option", { value: "rf" }, t("mRf")), h("option", { value: "svm" }, t("mSvm")), h("option", { value: "gbm" }, t("mGbm")));
+    modelEl.value = typeof p.model === "string" && ["lasso", "rf", "svm", "gbm"].includes(p.model) ? p.model : "topk";
+    const main = compact([
       choice("rs-p4-lock", t("p4Lock"), "lockMode", [["create", t("lockCreate")], ["use", t("lockUse")], ["none", t("lockNone")]]),
       p.lockMode === "create" ? numberRow("rs-p4-frac", t("p4Frac"), "testFraction", { step: 0.05, min: 0.05, max: 0.95, emptyIsNull: true }) : null,
+      p.lockMode === "use" ? fileBlock({
+        testId: "rs-file-lock", label: t("lockFile"), multiple: false, accept: ".json,application/json",
+        items: s.lock ? [{ name: s.lock.name, testId: "rs-lock-loaded" }] : [],
+        onAdd: async (fs) => { const f = fs[0]; if (f) s.lock = { name: f.name, text: await f.text() }; s.result = null; render(); },
+        onRemove: () => { s.lock = null; s.result = null; render(); },
+      }) : null,
       numberRow("rs-p4-outer", t("p4Outer"), "outerK", { step: 1, min: 2, emptyIsNull: true }),
       numberRow("rs-p4-inner", t("p4Inner"), "innerK", { step: 1, min: 2, emptyIsNull: true }),
       numberRow("rs-p4-repeats", t("p4Repeats"), "repeats", { step: 1, min: 1, max: 100, emptyIsNull: true }),
-      (() => {
-        const el = h("select", { "data-testid": "rs-p4-model", onchange: (e: Event) => { s.params = { ...s.params, model: (e.target as HTMLSelectElement).value }; s.result = null; render(); } },
-          h("option", { value: "topk" }, t("mTopk")), h("option", { value: "lasso" }, t("mLasso")),
-          h("option", { value: "rf" }, t("mRf")), h("option", { value: "svm" }, t("mSvm")), h("option", { value: "gbm" }, t("mGbm")));
-        el.value = typeof p.model === "string" && ["lasso", "rf", "svm", "gbm"].includes(p.model) ? p.model : "topk";
-        return h("div", { class: "rs-row" }, h("label", {}, t("p4Model")), el);
-      })(),
+      h("div", { class: "rs-row" }, h("label", {}, t("p4Model")), modelEl),
       ...mlControls(),
       p.model === "lasso" ? choice("rs-p4-lasso-rule", t("r5LassoRule"), "lassoRule", [["min", t("ruleMin")], ["1se", t("rule1se")]]) : null,
       p.model === "lasso" ? numberRow("rs-p4-nlambda", t("r5NLambda"), "lassoNLambda", { step: 10, min: 2 }) : null,
@@ -311,11 +589,20 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         onchange: (e: Event) => { const v = (e.target as HTMLInputElement).value.trim(); s.params = { ...s.params, kCandidates: v === "" ? null : v }; s.result = null; },
       })),
       h("div", { class: "rs-note", "data-testid": "rs-p4-examples" }, t("p4Examples")),
-      h("div", { class: "rs-row" }, h("label", {}, t("p4Const")), h("input", { type: "checkbox", checked: p.dropConstant === true, "data-testid": "rs-p4-const", onchange: (e: Event) => { s.params = { ...s.params, dropConstant: (e.target as HTMLInputElement).checked }; s.result = null; } })),
-      numberRow("rs-p4-corr", t("p4Corr"), "correlationThreshold", { step: 0.01, min: 0.5, max: 1, emptyIsNull: true }),
       choice("rs-p4-missing", t("p4Missing"), "missing", [["complete", t("mComplete")], ["impute", t("mImpute")]]),
-    );
-    return out.filter((x): x is HTMLElement => x !== null);
+    ]);
+    const more = compact([
+      p.outcomeKind === "survival" ? choice("rs-p4-strat", t("p4Strat"), "stratifySurvival", [["true", t("stratYes")], ["false", t("stratNo")]], (v) => v === "true") : null,
+      p.outcomeKind === "survival" ? numberRow("rs-p4-boot", t("p4Boot"), "testBootstrapB", { step: 100, min: 100 }) : null,
+      numberRow("rs-p4-corr", t("p4Corr"), "correlationThreshold", { step: 0.01, min: 0.5, max: 1, emptyIsNull: true }),
+      h("div", { class: "rs-row" }, h("label", {}, t("p4Const")), h("input", { type: "checkbox", checked: p.dropConstant === true, "data-testid": "rs-p4-const", onchange: (e: Event) => { s.params = { ...s.params, dropConstant: (e.target as HTMLInputElement).checked }; s.result = null; } })),
+      fileBlock({
+        testId: "rs-file-exclusion", label: t("exclFile"), multiple: false, items: s.exclusion ? tableItems([s.exclusion]) : [],
+        onAdd: async (fs) => { s.exclusion = (await load(fs))[0] ?? s.exclusion; s.result = null; render(); },
+        onRemove: () => { s.exclusion = null; s.result = null; render(); },
+      }),
+    ]);
+    return { main, more };
   }
 
   /** 候補の並び（カンマ区切りの文字列のまま持つ）。 */
@@ -344,75 +631,78 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     return rows;
   }
 
-  function r5Controls(): HTMLElement[] {
+  function r5Controls(): Controls {
     const p = s.params;
-    const choice = (testId: string, label: string, key: string, options: [string, string][], allowNone: boolean) => {
-      const el = h("select", { "data-testid": testId, onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; s.params = { ...s.params, [key]: v === "" ? null : v }; s.result = null; render(); } },
-        allowNone ? h("option", { value: "" }, t("choose")) : null, ...options.map(([v, l]) => h("option", { value: v }, l)));
-      el.value = p[key] === null || p[key] === undefined ? "" : String(p[key]);
-      return h("div", { class: "rs-row" }, h("label", {}, label), el);
-    };
+    const choice = (testId: string, label: string, key: string, options: [string, string][], allowNone: boolean) => choiceRow(testId, label, key, options, allowNone ? { none: t("choose") } : {});
     const boost = p.r5Screen === "boost";
-    const out: (HTMLElement | null)[] = [
+    const main = compact([
       numberRow("rs-r5-corr", t("r5Corr"), "r5Corr", { step: 0.01, min: 0.5, max: 1, emptyIsNull: true }),
       choice("rs-r5-screen", t("r5Screen"), "r5Screen", [["boost", t("sBoost")], ["lasso", t("sLasso")]], false),
-      boost ? numberRow("rs-r5-iter", t("r5BoostIter"), "r5BoostIterations", { step: 10, min: 1 }) : null,
       boost ? numberRow("rs-r5-nu", t("r5Nu"), "r5BoostNu", { step: 0.01, min: 0.000001, max: 1, emptyIsNull: true }) : null,
-      boost ? null : numberRow("rs-r5-folds", t("r5LassoFolds"), "r5LassoFolds", { step: 1, min: 2 }),
       boost ? null : choice("rs-r5-rule", t("r5LassoRule"), "r5LassoRule", [["min", t("ruleMin")], ["1se", t("rule1se")]], true),
+      h("div", { class: "rs-note", "data-testid": "rs-r5-examples" }, t("r5Examples")),
+      Number(p.r5BootstrapB) > 0 ? h("div", { class: "rs-note", "data-testid": "rs-r5-heavy" }, t("r5Heavy")) : null,
+    ]);
+    const more = compact([
+      boost ? numberRow("rs-r5-iter", t("r5BoostIter"), "r5BoostIterations", { step: 10, min: 1 }) : null,
+      boost ? null : numberRow("rs-r5-folds", t("r5LassoFolds"), "r5LassoFolds", { step: 1, min: 2 }),
       boost ? null : numberRow("rs-r5-nlambda", t("r5NLambda"), "r5LassoNLambda", { step: 10, min: 2 }),
       numberRow("rs-r5-pin", t("r5PIn"), "r5PIn", { step: 0.01, min: 0.000001, max: 0.5 }),
       numberRow("rs-r5-pout", t("r5POut"), "r5POut", { step: 0.01, min: 0.000001, max: 0.5 }),
       numberRow("rs-r5-max", t("r5MaxVars"), "r5MaxVars", { step: 1, min: 1 }),
       numberRow("rs-r5-boot", t("r5Boot"), "r5BootstrapB", { step: 100, min: 0 }),
-      h("div", { class: "rs-note", "data-testid": "rs-r5-examples" }, t("r5Examples")),
-      Number(p.r5BootstrapB) > 0 ? h("div", { class: "rs-note", "data-testid": "rs-r5-heavy" }, t("r5Heavy")) : null,
-    ];
-    return out.filter((x): x is HTMLElement => x !== null);
+    ]);
+    return { main, more };
   }
 
-  function skillControls(): HTMLElement {
-    const p = s.params;
-    const pick = (id: string) => { s.skill = [DATASET_CHECK, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE, R5_MODEL].find((r) => r.id === id) ?? DATASET_CHECK; s.result = null; s.selectedFeature = null; render(); };
-    const sel = h("select", { "data-testid": "rs-skill", onchange: (e: Event) => pick((e.target as HTMLSelectElement).value) },
-      h("option", { value: DATASET_CHECK.id }, t("skillCheck")), h("option", { value: R1_PROGNOSIS.id }, t("skillR1")), h("option", { value: R2_DISCRIMINATION.id }, t("skillR2")), h("option", { value: R3_REPRODUCIBILITY.id }, t("skillR3")), h("option", { value: P4_PIPELINE.id }, t("skillP4")), h("option", { value: R5_MODEL.id }, t("skillR5")));
-    sel.value = s.skill.id;
-    const out: Node[] = [h("div", { class: "rs-row" }, h("label", {}, t("skill")), sel)];
-    if (s.skill.id === R3_REPRODUCIBILITY.id) return h("div", {}, ...out, ...r3Controls());
-    if (s.skill.id === P4_PIPELINE.id) return h("div", {}, ...out, ...p4Controls());
-    if (s.skill.id === R5_MODEL.id) return h("div", {}, ...out, ...r5Controls());
-    if (s.skill.id === R2_DISCRIMINATION.id) return h("div", {}, ...out, ...r2Controls());
-    if (s.skill.id !== R1_PROGNOSIS.id) return h("div", {}, ...out);
-    const choice = (testId: string, label: string, key: string, options: [string, string][]) => {
-      const el = h("select", { "data-testid": testId, onchange: (e: Event) => { s.params = { ...s.params, [key]: (e.target as HTMLSelectElement).value }; s.result = null; render(); } },
-        ...options.map(([v, l]) => h("option", { value: v }, l)));
-      el.value = String(p[key]);
-      return h("div", { class: "rs-row" }, h("label", {}, label), el);
-    };
-    out.push(
-      choice("rs-group-mode", t("groupMode"), "groupMode", [["median", t("gMedian")], ["value", t("gValue")], ["tertile", t("gTertile")], ["optimal", t("gOptimal")]]),
-      p.groupMode === "value" ? numberRow("rs-group-value", t("groupValue"), "groupValue", { emptyIsNull: true }) : (null as unknown as HTMLElement),
-      choice("rs-multiplicity", t("multiplicity"), "multiplicity", [["bh", t("mBh")], ["none", t("mNone")]]),
-      numberRow("rs-alpha", t("alpha"), "alpha", { step: 0.01, min: 0.0001, max: 0.5 }),
-      p.groupMode === "optimal" ? numberRow("rs-min-fraction", t("minFraction"), "minGroupFraction", { step: 0.05, min: 0.01, max: 0.4 }) : (null as unknown as HTMLElement),
-      p.groupMode === "optimal" ? numberRow("rs-permutations", t("permutations"), "permutations", { step: 100, min: 19 }) : (null as unknown as HTMLElement),
-      numberRow("rs-rmst-tau", t("rmstTau"), "rmstTau", { emptyIsNull: true, min: 0 }),
-      h("div", { class: "rs-row" }, h("label", {}, t("mw")), h("input", { type: "checkbox", checked: p.mannWhitney === true, "data-testid": "rs-mw", onchange: (e: Event) => { s.params = { ...s.params, mannWhitney: (e.target as HTMLInputElement).checked }; s.result = null; } })),
-      numberRow("rs-bootstrap", t("bootstrapB"), "bootstrapB", { step: 100, min: 0 }),
-    );
-    if (p.groupMode === "optimal") {
-      const m = defaultFeatureColumns({ header: s.features[0]?.table.header ?? [], rows: s.features.flatMap((x) => x.table.rows) }, [p.featureIdColumn as string | null, p.patientColumn as string | null]).length;
-      if (m) out.push(h("div", { class: "rs-note", "data-testid": "rs-heavy" }, t("heavy", { m, b: Number(p.permutations) })));
+  function paramControls(): Controls {
+    switch (s.skill?.id) {
+      case R1_PROGNOSIS.id: return r1Controls();
+      case R2_DISCRIMINATION.id: return r2Controls();
+      case R3_REPRODUCIBILITY.id: return r3Controls();
+      case P4_PIPELINE.id: return p4Controls();
+      case R5_MODEL.id: return r5Controls();
+      default: return { main: [], more: [] };
     }
-    return h("div", {}, ...out.filter((x) => x !== null));
+  }
+
+  // ④ 実行 -----------------------------------------------------------------------------------
+
+  function runSection(r3: boolean): Section {
+    const checkReady = r3 ? s.features.length > 0 : s.check.status === "done" && s.check.ok;
+    const reason = !s.skill ? t("reasonSkill") : !checkReady ? (r3 ? t("reasonFeatures") : t("reasonCheck")) : r3 && s.features.length < 2 ? t("reasonCond") : null;
+    return {
+      id: "run", title: t("secRun"),
+      body: [
+        h("div", { class: "rs-row" },
+          h("label", {}, t("seed")),
+          h("input", { type: "number", min: 0, step: 1, value: s.seed, "data-testid": "rs-seed", onchange: (e: Event) => { s.seed = Math.max(0, Math.floor(Number((e.target as HTMLInputElement).value) || 0)); } }),
+        ),
+        h("div", { class: "rs-actions" },
+          h("button", { class: "rs-primary", "data-testid": "rs-run", disabled: reason !== null || s.progress !== null, onclick: () => run(false) }, t("runR1")),
+          s.progress !== null ? h("button", { "data-testid": "rs-cancel", onclick: () => { s.cancelled = true; } }, t("cancel")) : null,
+          reason ? h("span", { class: "rs-note" }, reason) : null,
+        ),
+        s.progress !== null
+          ? h("div", { "data-testid": "rs-progress" },
+            h("div", { class: "rs-note" }, t("running", { label: s.progress.label, pct: Math.round(s.progress.fraction * 100) })),
+            h("div", { class: "rs-progress" }, h("div", { style: `width:${Math.round(s.progress.fraction * 100)}%` })))
+          : null,
+      ],
+    };
+  }
+
+  function resultSection(r: NonNullable<State["result"]>): Section {
+    return { id: "result", title: t("secResult"), body: [resultView(r)] };
   }
 
   async function run(evaluate = false) {
-    const needsClinical = s.skill.id !== R3_REPRODUCIBILITY.id;
-    const isP4 = s.skill.id === P4_PIPELINE.id;
-    if ((needsClinical && !s.clinical) || !s.features.length || s.progress !== null) return;
     const skill = s.skill;
-    const params: Record<string, ParamValue> = { ...s.params };
+    if (!skill) return;
+    const noClinical = skill.id === R3_REPRODUCIBILITY.id;
+    const isP4 = skill.id === P4_PIPELINE.id;
+    if ((!noClinical && !s.clinical) || !s.features.length || s.progress !== null) return;
+    const params: Record<string, ParamValue> = sanitizeRoles(rolesForSkill(skill.id, s.params), s.params);
     for (const k of Object.keys(params)) if (!(k in skill.defaults)) delete params[k];
     if (isP4) params.evaluateTest = evaluate;
     s.cancelled = false;
@@ -423,7 +713,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       const { record, state } = await runSkill(
         skill,
         {
-          features: s.features, clinical: needsClinical ? (s.clinical ?? undefined) : undefined, baseline: s.baseline, followup: s.followup,
+          features: s.features, clinical: noClinical ? undefined : (s.clinical ?? undefined), baseline: noClinical ? [] : s.baseline, followup: noClinical ? [] : s.followup,
           exclusion: isP4 ? (s.exclusion ?? undefined) : undefined, lock: isP4 && s.params.lockMode === "use" ? (s.lock ?? undefined) : undefined,
         },
         params,
@@ -466,25 +756,9 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
   function resultView(r: NonNullable<State["result"]>): HTMLElement {
     const failed = r.record.steps.flatMap((x) => x.errors);
     const warns = r.record.steps.flatMap((x) => x.warnings);
-    const rep = r.report;
-    const list = (title: string, xs: string[], testId: string) =>
-      xs.length ? h("details", { "data-testid": testId }, h("summary", {}, `${title}（${xs.length}）`), h("ul", {}, ...xs.map((x) => h("li", {}, x)))) : null;
     return h("div", { "data-testid": "rs-result" },
-      r.record.skillId === R3_REPRODUCIBILITY.id ? null : h("h2", {}, t("step3")),
       failed.length ? h("div", { class: "rs-err", "data-testid": "rs-errors" }, h("b", {}, t("errors")), h("ul", {}, ...failed.map((e) => h("li", {}, e)))) : null,
       warns.length ? h("div", { class: "rs-warn", "data-testid": "rs-warnings" }, h("b", {}, t("warnings")), h("ul", {}, ...warns.map((e) => h("li", {}, e)))) : null,
-      rep ? h("div", {},
-        h("div", { class: "rs-big", "data-testid": "rs-joined" }, t("joined", { n: rep.joined })),
-        h("div", { "data-testid": "rs-counts" }, t("counts", { rows: rep.featureRows, pf: rep.patientsInFeatures, pc: rep.patientsInClinical, fo: rep.featureOnly.length, co: rep.clinicalOnly.length })),
-        rep.survivalUsable !== null ? h("div", { "data-testid": "rs-survival" }, t("survival", { n: rep.survivalUsable })) : null,
-        rep.lesionsPerPatient ? h("div", { class: "rs-note" }, t("lesions", rep.lesionsPerPatient)) : null,
-        list(t("featureOnly"), rep.featureOnly, "rs-feature-only"),
-        list(t("clinicalOnly"), rep.clinicalOnly, "rs-clinical-only"),
-        rep.missing.length
-          ? list(t("missing"), rep.missing.map((m) => t("missingRow", { name: m.name, count: m.count, of: m.of })), "rs-missing")
-          : h("div", { class: "rs-note", "data-testid": "rs-no-missing" }, t("noMissing")),
-        list(t("exclusions"), rep.exclusions.map((x) => `${x.id}: ${x.reason}`), "rs-exclusions"),
-      ) : null,
       r.p4 ? p4Panel(r.p4, t) : null,
       r.r5 ? r5Panel(r.r5, t) : null,
       r.p4 && r.p4.final?.model && r.p4.params.lockMode === "use" && !r.p4.test && r.record.status === "ok"
@@ -495,7 +769,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       r.r3 && r.r3.rows.length ? r3Panel(r.r3, t, s.ba, (c) => { s.ba = c; render(); }) : null,
       r.r2 && r.r2.rows.length ? r2Panel(r.r2, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
       r.r1 && r.r1.rows.length ? r1Panel(r.r1, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
-      h("h2", {}, t("step4")),
+      h("h3", {}, t("saveHead")),
       h("div", { class: "rs-row" },
         r.record.skillId === R3_REPRODUCIBILITY.id ? null : h("button", { "data-testid": "rs-save-data", disabled: !r.dataset, onclick: () => r.dataset && download(datasetCsv(r.dataset, (s.params.clinicalIdColumn as string) ?? "ID"), "research-stats-dataset.csv", "text/csv;charset=utf-8") }, t("saveData")),
         r.r1 && r.r1.rows.length ? h("button", { "data-testid": "rs-save-results", onclick: () => download(r1ResultsCsv(r.r1!.rows), "research-stats-r1-results.csv", "text/csv;charset=utf-8") }, t("saveResults")) : null,
@@ -521,7 +795,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         r.r2 && r.r2.rows.length ? h("button", { "data-testid": "rs-save-r2-results", onclick: () => download(r2ResultsCsv(r.r2!.rows), "research-stats-r2-results.csv", "text/csv;charset=utf-8") }, t("saveR2Results")) : null,
         r.r2?.combo && r.r2.combo.rocLoo.length ? h("button", { "data-testid": "rs-save-curves", onclick: () => download(r2CurvesCsv(r.r2!.combo!), "research-stats-r2-curves.csv", "text/csv;charset=utf-8") }, t("saveCurves")) : null,
         r.r2?.tree ? h("button", { "data-testid": "rs-save-tree", onclick: () => download(treeCsv(r.r2!.tree!.root, r.r2!.context.names), "research-stats-r2-tree.csv", "text/csv;charset=utf-8") }, t("saveTree")) : null,
-        h("button", { "data-testid": "rs-save-method", onclick: () => download(methodText(r.record, s.skill, locale), "research-stats-method.txt", "text/plain;charset=utf-8") }, t("saveMethod")),
+        h("button", { "data-testid": "rs-save-method", onclick: () => download(methodText(r.record, s.skill ?? DATASET_CHECK, locale), "research-stats-method.txt", "text/plain;charset=utf-8") }, t("saveMethod")),
         h("button", { "data-testid": "rs-save-record", onclick: () => download(`${JSON.stringify(r.record, null, 2)}\n`, "research-stats-record.json", "application/json") }, t("saveRecord")),
       ),
     );
