@@ -266,3 +266,155 @@ describe("wizard: data leakage warnings", () => {
     await until(() => !!q("rs-check-pass"), "check pass again");
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// 前処理の区画（段 B3b）。Skill ごとに手順の出方が変わる
+// ---------------------------------------------------------------------------------------------
+async function setNumber(testId: string, v: string) {
+  const el = q(testId) as HTMLInputElement;
+  el.value = v;
+  el.dispatchEvent(new Event("change"));
+  await tick();
+}
+const has = (id: string) => q(id) !== null;
+// 特徴量: 差のある f1・f2 に加え、定数 fc と、f1 と順位が同じ fd（f1 の 2 乗）
+const preFeatureCsv = (idList: string[]) =>
+  `CaseLabel,PatientID,f1,f2,fc,fd\n` + idList.flatMap((id, i) => [0, 1].map((k) => {
+    const f1 = (1 + ((i * 13 + k * 5) % 17)) / 3 + (i % 2 ? 3 : 0);
+    return `${id}_L${k},${id},${f1.toFixed(4)},${((2 + ((i * 7 + k) % 11)) / 7).toFixed(4)},2,${(f1 * f1).toFixed(4)}`;
+  })).join("\n") + "\n";
+
+describe("wizard: preprocessing section", () => {
+  async function ready() {
+    await pickFile("rs-file-features", "feat.csv", preFeatureCsv(ids));
+    await pickFile("rs-file-clinical", "clin.csv", clinicalCsv("PatientID", ids));
+    await until(() => !!q("rs-check-pass"), "check pass");
+  }
+
+  it("shows the steps that exist for each skill and none that do not; R3 has no section; the run section is numbered 5", async () => {
+    await ready();
+    expect(has("rs-sec-pre")).toBe(false); // 解析の種類を選ぶまで無い
+    const nums = () => Array.from(root.querySelectorAll(".rs-num")).map((e) => e.textContent);
+    // R1: 分散 0・相関だけ（対応なし・報告・標準化は出ない）
+    await choose("rs-skill", "r1-prognosis");
+    expect(has("rs-sec-pre")).toBe(true);
+    expect(nums()).toEqual(["1", "2", "3", "4", "5"]);
+    expect(q("rs-sec-run")!.querySelector(".rs-num")!.textContent).toBe("5");
+    for (const id of ["rs-pre-const", "rs-pre-corr"]) expect(has(id), id).toBe(true);
+    for (const id of ["rs-pre-assump-on", "rs-pre-unpaired-on", "rs-pre-paired-on", "rs-pre-std", "rs-p4-const", "rs-r5-corr"]) expect(has(id), id).toBe(false);
+    // ⓘ のツールチップ
+    expect(q("rs-pre-const-tip")!.getAttribute("title")!.length).toBeGreaterThan(10);
+    // 既定はすべてオフ
+    expect(check(q("rs-pre-const"))).toBe(false);
+    expect((q("rs-pre-corr") as HTMLInputElement).value).toBe("");
+    // R2: ＋正規性・等分散性の報告
+    await choose("rs-skill", "r2-discrimination");
+    for (const id of ["rs-pre-const", "rs-pre-corr", "rs-pre-assump-on"]) expect(has(id), id).toBe(true);
+    for (const id of ["rs-pre-unpaired-on", "rs-pre-paired-on", "rs-pre-std"]) expect(has(id), id).toBe(false);
+    // R3: 区画が無い
+    await choose("rs-skill", "r3-reproducibility");
+    expect(has("rs-sec-pre")).toBe(false);
+  });
+
+  it("P4: binary outcome adds the unpaired p-value filter and the standardisation display; survival does not; the old data-testids are kept", async () => {
+    await ready();
+    await choose("rs-skill", "p4-pipeline");
+    expect(has("rs-pre-unpaired-on")).toBe(false); // 結果の型を選ぶまで出さない
+    await choose("rs-p4-kind", "survival");
+    for (const id of ["rs-p4-const", "rs-p4-corr", "rs-pre-std"]) expect(has(id), id).toBe(true);
+    for (const id of ["rs-pre-unpaired-on", "rs-pre-assump-on", "rs-pre-const", "rs-pre-corr"]) expect(has(id), id).toBe(false);
+    await choose("rs-p4-kind", "binary");
+    for (const id of ["rs-p4-const", "rs-p4-corr", "rs-pre-std", "rs-pre-unpaired-on", "rs-pre-assump-on"]) expect(has(id), id).toBe(true);
+    expect(has("rs-pre-paired-on")).toBe(false); // 前と後の表が無い
+    // 標準化は「必要か」を表示するだけ（モデルで決まる）
+    expect(q("rs-pre-std")!.getAttribute("data-need")).toBe("true"); // 上位 k 個（ロジスティック）
+    await choose("rs-p4-model", "rf");
+    expect(q("rs-pre-std")!.getAttribute("data-need")).toBe("false");
+    await choose("rs-p4-model", "lasso");
+    expect(q("rs-pre-std")!.getAttribute("data-need")).toBe("true");
+    // 対応なしの除外: オンにすると α・しきい値が出る（既定は空）
+    await toggle("rs-pre-unpaired-on", true);
+    expect((q("rs-pre-unpaired-alpha") as HTMLInputElement).value).toBe("");
+    expect((q("rs-pre-unpaired-thr") as HTMLInputElement).value).toBe("");
+    expect(q("rs-pre-unpaired-cost")!.textContent).toContain("入れる"); // 分割数が空の間は目安を出さない
+    await setNumber("rs-p4-outer", "4"); await setNumber("rs-p4-inner", "3"); await setNumber("rs-p4-repeats", "1");
+    expect(q("rs-pre-unpaired-cost")!.textContent).toContain("訓練の行の組 20 回"); // (4×1+1)×(3+1)
+  });
+
+  it("R5: the correlation threshold moved here with its data-testid; zero variance is fixed; standardisation is shown; no p-value filter without before/after tables", async () => {
+    await ready();
+    await choose("rs-skill", "r5-model");
+    for (const id of ["rs-r5-corr", "rs-pre-const-fixed", "rs-pre-std"]) expect(has(id), id).toBe(true);
+    for (const id of ["rs-pre-const", "rs-pre-corr", "rs-pre-unpaired-on", "rs-pre-paired-on", "rs-pre-assump-on"]) expect(has(id), id).toBe(false);
+    expect(q("rs-sec-pre")!.contains(q("rs-r5-corr"))).toBe(true);
+  });
+
+  it("the paired filter appears only after both the before and after tables are loaded", async () => {
+    await ready();
+    await choose("rs-skill", "r1-prognosis");
+    expect(has("rs-pre-paired-on")).toBe(false);
+    await pickFile("rs-file-baseline", "base.csv", "CaseLabel,PatientID,f1,f2\nA_L0,P001,1,2\n");
+    expect(has("rs-pre-paired-on")).toBe(false); // 片方だけでは出ない
+    await pickFile("rs-file-followup", "follow.csv", "CaseLabel,PatientID,f1,f2\nA_L0,P001,2,3\n");
+    await until(() => !!q("rs-check-pass"), "check pass");
+    expect(has("rs-pre-paired-on")).toBe(true);
+    await toggle("rs-pre-paired-on", true);
+    expect(has("rs-pre-paired-alpha")).toBe(true);
+    expect(has("rs-pre-paired-thr")).toBe(true);
+  });
+
+  it("default flow: R2 runs with every preprocessing step left off and shows no preprocessing result", async () => {
+    await ready();
+    await choose("rs-skill", "r2-discrimination");
+    await choose("rs-positive", "resp");
+    (q("rs-run") as HTMLButtonElement).click();
+    await until(() => !!q("rs-result") || !!q("rs-errors"), "result", 60000);
+    expect(q("rs-errors")).toBeNull();
+    expect(has("rs-pre-result")).toBe(false);
+    expect(has("rs-assump")).toBe(false);
+  }, 70000);
+
+  it("R2 with zero-variance, correlation and the assumption report: shows what was removed and the assumption table, and offers the CSV", async () => {
+    await ready();
+    await choose("rs-skill", "r2-discrimination");
+    await choose("rs-positive", "resp");
+    await toggle("rs-pre-const", true);
+    await setNumber("rs-pre-corr", "0.95");
+    await toggle("rs-pre-assump-on", true);
+    await setNumber("rs-pre-assump-alpha", "0.05");
+    (q("rs-run") as HTMLButtonElement).click();
+    await until(() => !!q("rs-result") || !!q("rs-errors"), "result", 60000);
+    expect(q("rs-errors")).toBeNull();
+    expect(q("rs-pre-result-count")!.textContent).toContain("4 → 2"); // fc（定数）と fd（f1 の 2 乗。順位は同じ）が除かれる
+    expect(q("rs-pre-result-removed")!.textContent).toContain("fc");
+    expect(q("rs-pre-result-removed")!.textContent).toContain("fd");
+    expect(q("rs-pre-result-m")!.textContent).toContain("m");
+    expect(all("rs-assump-row").length).toBe(2);
+    expect(has("rs-save-assumptions")).toBe(true);
+  }, 70000);
+
+  it("P4 with the unpaired p-value filter runs from the default controls and lists the removals per training set", async () => {
+    await ready();
+    await choose("rs-skill", "p4-pipeline");
+    await choose("rs-p4-kind", "binary");
+    await choose("rs-positive", "resp");
+    await choose("rs-p4-lock", "none");
+    await setNumber("rs-p4-outer", "4"); await setNumber("rs-p4-inner", "3"); await setNumber("rs-p4-repeats", "1");
+    (q("rs-p4-k") as HTMLInputElement).value = "1, 2";
+    q("rs-p4-k")!.dispatchEvent(new Event("change"));
+    await choose("rs-p4-missing", "complete");
+    await toggle("rs-p4-const", true); // 定数 fc を先に除く（検定できない列で全部落ちるのを避ける）
+    await toggle("rs-pre-unpaired-on", true);
+    await setNumber("rs-pre-unpaired-alpha", "0.05");
+    await setNumber("rs-pre-unpaired-thr", "0.2");
+    (q("rs-run") as HTMLButtonElement).click();
+    await until(() => !!q("rs-result") || !!q("rs-errors"), "result", 90000);
+    expect(q("rs-errors")?.textContent).toBeUndefined();
+    expect(q("rs-p4-pdrop")).toBeTruthy();
+    expect(all("rs-p4-pdrop-row").length).toBe(5); // 外側 4 ＋ 最終モデル
+    expect(q("rs-p4-pdrop-summary")!.textContent).toContain("外側の訓練 4 回");
+    expect(has("rs-save-p4-pdrop")).toBe(true);
+    expect(has("rs-save-assumptions")).toBe(false);
+    expect(q("rs-p4-leak-rows")!.getAttribute("data-level")).toBe("notice"); // 定数の除外が全行を読む（注意）。p 値による除外は訓練側だけ
+  }, 100000);
+});

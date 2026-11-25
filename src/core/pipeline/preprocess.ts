@@ -1,3 +1,5 @@
+import { meanSd } from "../stats/standardize";
+
 /**
  * 前処理を**訓練に使う行だけ**から求めて、他の行に当てる（データ漏れを防ぐ）。
  * 欠損の補完は訓練の行の中央値。標準化は補完した後の訓練の行の平均・SD（n−1）。
@@ -43,8 +45,7 @@ export function fitStandardizer(X: number[][], train: number[], cols: number[]):
   for (const j of cols) {
     const v = train.map((i) => X[i][j]);
     if (v.some((x) => !Number.isFinite(x))) return { error: `訓練の行に欠損がある列を使おうとしました（列 ${j + 1}）` };
-    const mu = v.reduce((a, b) => a + b, 0) / v.length;
-    const sd = Math.sqrt(v.reduce((a, b) => a + (b - mu) ** 2, 0) / (v.length - 1));
+    const { mean: mu, sd } = meanSd(v);
     if (!(sd > 0)) return { error: `訓練の行で値が同じ特徴量があります（列 ${j + 1}）` };
     means.push(mu);
     sds.push(sd);

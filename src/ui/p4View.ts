@@ -6,6 +6,7 @@ import { h } from "./dom";
 import type { Key } from "./i18n";
 import { xyChart, type XySeries } from "./xyChart";
 import { hyperText } from "../core/pipeline/nestedCv";
+import { assumptionView, pdropView } from "./preView";
 
 type T = (key: Key, vars?: Record<string, string | number>) => string;
 const f3 = (v: number | null | undefined) => (v === null || v === undefined ? "—" : v.toFixed(3));
@@ -24,7 +25,7 @@ function importanceChart(items: { n: string; v: number }[], t: T): HTMLElement {
 /** P4 の結果: 人数、外側の分割ごとの評価（表と図）、束ねた ROC・較正、選ばれた回数、最終モデル、テスト集合の評価。 */
 /** データリークの検査（分割・前処理の行）。 */
 export function leakView(split: SplitCheck, rowUse: RowUseCheck | null, t: T, testId: string): HTMLElement {
-  const stage: Record<string, Key> = { qc: "leakStageQc", impute: "leakStageImpute", rank: "leakStageRank", fit: "leakStageFit" };
+  const stage: Record<string, Key> = { qc: "leakStageQc", impute: "leakStageImpute", rank: "leakStageRank", fit: "leakStageFit", pdrop: "leakStagePdrop", pdropPaired: "leakStagePdropPaired" };
   const where: Record<string, Key> = { pre: "leakWherePre", fold: "leakWhereFold", inner: "leakWhereInner", final: "leakWhereFinal", finalInner: "leakWhereFinalInner" };
   const bad = rowUse?.findings.filter((f) => f.violating > 0) ?? [];
   return h("div", { "data-testid": testId },
@@ -115,5 +116,7 @@ export function p4Panel(st: P4State, t: T): HTMLElement {
     lockInfo, sizes,
     qc ? list(t("p4Removed"), qc.removed.map((r) => `${r.feature}: ${r.reason}`), "rs-p4-removed") : null,
     qc ? list(t("p4Dropped"), qc.droppedDev, "rs-p4-dropped") : null,
+    qc ? assumptionView(qc.assumptions, t) : null,
+    pdropView(st.spec?.pdrop?.log, t),
     cvView, finalView, st.leak ? leakView(st.leak.split, st.leak.rowUse, t, "rs-p4-leak") : null, testView);
 }

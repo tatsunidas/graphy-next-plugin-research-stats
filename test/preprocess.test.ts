@@ -7,7 +7,7 @@ import { wilcoxonSignedRank } from "../src/core/stats/wilcoxon";
 import { mannWhitney } from "../src/core/survival/mannwhitney";
 import { selectPaired, selectUnpaired } from "../src/core/stats/assumptions";
 import { dropByPValue } from "../src/core/stats/dropByPValue";
-import { fitStandardizer, needsStandardization } from "../src/core/stats/standardize";
+import { fitStandardizerNullable as fitStandardizer, needsStandardization } from "../src/core/stats/standardize";
 import { normalQuantile } from "../src/core/survival/dist";
 
 /** |a − b| <= abs + rel·|b|。null（計算できない）は null どうしでだけ一致。 */

@@ -6,7 +6,8 @@ import { buildDataset, type Dataset, type JoinReport, type RowFilter } from "./d
 import { checkPatientSplit, checkRowUse, idLikeColumns, targetLeaks, type RowUseCheck, type SplitCheck } from "./leak";
 import { RowTrace } from "./pipeline/rowTrace";
 import { buildDelta, deltaToTable, type DeltaOrder, type DeltaResult } from "./delta";
-import type { ParamValue, Skill, StepOutcome } from "./skill";
+import type { ParamValue, Skill, StepContext, StepOutcome } from "./skill";
+import { pairedFromDelta, preActive, preDetail, preSummary, readPre, runPre, PRE_PAIRED_DEFAULTS, PRE_QC_DEFAULTS, PRE_ASSUMP_DEFAULTS, type PairedMatrix, type PreCaps, type PreInfo } from "./pipeline/pre";
 import {
   analyzeFeature, applyMultiplicity, covariatesOf, isSelected, multivariate, R1_DEFAULTS, readR1Params, survivalCohort,
   type CovariateData, type FeatureContext, type FeatureResult, type MultivariateResult, type R1Params, type SurvivalCohort,
@@ -24,7 +25,8 @@ import {
   buildCohort, checkSpec, evaluateTest, exclusionNames, featuresFingerprint, finalModel, fitCount, nestedCv, P4_DEFAULTS, qcAndMissing, readP4Params, specOf, splitCohort, subMatrix,
   type FinalModel, type NestedCvResult, type P4Cohort, type P4Params, type QcStepResult, type SplitResult, type TestResult,
 } from "./p4";
-import { gridOf, gridText, hyperText, type NestedCvSpec } from "./pipeline/nestedCv";
+import { gridOf, gridText, hyperText, type NestedCvSpec, type PDropEntry } from "./pipeline/nestedCv";
+import { testCounts } from "./stats/assumptionReport";
 import { r5Model, R5_DEFAULTS, readR5Params, type R5Model, type R5Params } from "./r5";
 
 const strList = (v: ParamValue): string[] | null => (Array.isArray(v) && v.every((x) => typeof x === "string") ? (v as string[]) : null);
@@ -36,6 +38,33 @@ const str = (v: ParamValue, name: string): string | null => {
   if (typeof v !== "string") throw new Error(`設定「${name}」は文字列にしてください`);
   return v;
 };
+
+/** 前処理の見出し（記録の手順名）。 */
+const PRE_TITLE = { ja: "前処理", en: "Preprocessing" };
+
+/**
+ * R1・R2・R5 の前処理（患者ごとの特徴量の行列に対して、解析の前に行う）。何も有効でなければ null（何も読まない）。
+ * values は [特徴量][患者]、patients は dataset の患者の番号（delta の前後の値を引くのに使う）。
+ */
+function cohortPre(ctx: StepContext, caps: PreCaps, names: string[], values: (number | null)[][], patients: number[], groups: { rows0: number[]; rows1: number[] } | null, qc = true): { keep: number[]; info: PreInfo } | { error: string } | null {
+  const spec = readPre(ctx.params, caps);
+  if ("error" in spec) return spec;
+  if (!preActive(spec)) return null;
+  const X = patients.map((_, i) => names.map((_, j) => values[j][i]));
+  let pm: PairedMatrix | null = null;
+  if (spec.paired) {
+    const delta = ctx.state.delta as DeltaResult | undefined, d = ctx.state.dataset as Dataset | undefined;
+    if (!delta || !d) return { error: "対応ありの p 値による除外には、前と後の表が要ります" };
+    const r = pairedFromDelta(d, delta, patients);
+    if ("error" in r) return r;
+    pm = r;
+  }
+  return runPre({ names, X, rows: patients.map((_, i) => i), spec, paired: pm, groups, qc, wholeCohort: true });
+}
+
+/** 前処理で特徴量が減ったことの注記（多重比較の補正の対象の数）。 */
+const mNote = (info: PreInfo, corrected: boolean) =>
+  `前処理で特徴量を ${info.before - info.after} 個除きました（${info.before} → ${info.after}。除いた特徴量と理由は結果と記録にあります）${corrected ? `。多重比較の補正の対象の数 m は、この除外の後の特徴量で数えます` : ""}`;
 
 export const DATASET_CHECK: Skill = {
   id: "dataset-check",
@@ -150,6 +179,8 @@ export const DATASET_CHECK: Skill = {
 };
 
 export interface R1State {
+  /** 前処理の結果（何も有効にしなければ null）。 */
+  pre: PreInfo | null;
   params: R1Params;
   cohort: SurvivalCohort;
   context: FeatureContext;
@@ -171,7 +202,7 @@ export const R1_PROGNOSIS: Skill = {
     "Salazar P et al. PLoS One 2024 (PMID 39739866)",
     "Haider MA et al. Cancer Imaging 2017 (PMID 28114978)",
   ],
-  defaults: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS },
+  defaults: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...PRE_QC_DEFAULTS, ...PRE_PAIRED_DEFAULTS },
   steps: [
     ...DATASET_CHECK.steps,
     {
@@ -190,13 +221,26 @@ export const R1_PROGNOSIS: Skill = {
           surv: cohort.surv, names: d.featureNames, event: cohort.surv.event,
           values: d.featureNames.map((_, j) => cohort.patients.map((i) => d.features[i][j])),
         };
-        ctx.state.r1 = { params: pr, cohort, context, covariates: cov, rows: [], comparisons: 0, model: null } satisfies R1State;
+        ctx.state.r1 = { pre: null, params: pr, cohort, context, covariates: cov, rows: [], comparisons: 0, model: null } satisfies R1State;
         const events = cohort.surv.event.reduce((a, b) => a + b, 0);
         const warnings = [];
         if (d.ids.length - cohort.patients.length > 0) warnings.push(`時間かイベントが欠けている患者 ${d.ids.length - cohort.patients.length} 人を除きました`);
         if (pr.groupMode === "optimal") warnings.push("最適しきい値は探索的です。素の p は多重比較で小さく出るため、並べ替え検定の補正 p を使います");
         if (pr.multiplicity === "none") warnings.push("多重比較の補正をしません（探索的な解析）");
         return { summary: { patients: cohort.patients.length, events, features: d.featureNames.length, covariates: cov.names.length }, warnings };
+      },
+    },
+    {
+      id: "pre",
+      title: PRE_TITLE,
+      run(ctx): StepOutcome {
+        const st = ctx.state.r1 as R1State;
+        const r = cohortPre(ctx, { qc: true, paired: true, unpaired: false, assumption: false }, st.context.names, st.context.values, st.cohort.patients, null);
+        if (r === null) return { summary: {}, warnings: [], skipped: true };
+        if ("error" in r) return { summary: {}, warnings: [], errors: [r.error] };
+        st.pre = r.info;
+        st.context = { ...st.context, names: r.keep.map((j) => st.context.names[j]), values: r.keep.map((j) => st.context.values[j]) };
+        return { summary: preSummary(r.info), warnings: r.info.removed.length ? [mNote(r.info, st.params.multiplicity === "bh")] : [], detail: preDetail(r.info) };
       },
     },
     {
@@ -247,6 +291,8 @@ export const R1_PROGNOSIS: Skill = {
 };
 
 export interface R2State {
+  /** 前処理の結果（何も有効にしなければ null）。 */
+  pre: PreInfo | null;
   params: R2Params;
   cohort: BinaryCohort;
   context: DiscrimContext;
@@ -268,7 +314,7 @@ export const R2_DISCRIMINATION: Skill = {
     "Weiss GJ et al. PLoS One 2014 (PMID 24987838)",
     "Sidhu HS et al. Eur Radiol 2017 (PMID 27620864)",
   ],
-  defaults: { ...DATASET_CHECK.defaults, ...R2_DEFAULTS },
+  defaults: { ...DATASET_CHECK.defaults, ...R2_DEFAULTS, ...PRE_QC_DEFAULTS, ...PRE_PAIRED_DEFAULTS, ...PRE_ASSUMP_DEFAULTS },
   steps: [
     ...DATASET_CHECK.steps,
     {
@@ -285,11 +331,26 @@ export const R2_DISCRIMINATION: Skill = {
           y: cohort.y, labels: cohort.labels, names: d.featureNames,
           values: d.featureNames.map((_, j) => cohort.patients.map((i) => d.features[i][j])),
         };
-        ctx.state.r2 = { params: pr, cohort, context, rows: [], comparisons: 0, combo: null, tree: null, treeNote: null } satisfies R2State;
+        ctx.state.r2 = { pre: null, params: pr, cohort, context, rows: [], comparisons: 0, combo: null, tree: null, treeNote: null } satisfies R2State;
         const pos = cohort.y.reduce((a, b) => a + b, 0);
         const warnings = d.ids.length - cohort.patients.length > 0 ? [`結果ラベルが欠けている患者 ${d.ids.length - cohort.patients.length} 人を除きました`] : [];
         if (pr.multiplicity === "none") warnings.push("多重比較の補正をしません（探索的な解析）");
         return { summary: { patients: cohort.patients.length, positive: pos, negative: cohort.y.length - pos, positiveLabel: pr.positiveLabel, negativeLabel: cohort.labels[0], features: d.featureNames.length }, warnings };
+      },
+    },
+    {
+      id: "pre",
+      title: PRE_TITLE,
+      run(ctx): StepOutcome {
+        const st = ctx.state.r2 as R2State;
+        const y = st.context.y;
+        const groups = { rows0: y.map((_, i) => i).filter((i) => y[i] === 0), rows1: y.map((_, i) => i).filter((i) => y[i] === 1) };
+        const r = cohortPre(ctx, { qc: true, paired: true, unpaired: false, assumption: true }, st.context.names, st.context.values, st.cohort.patients, groups);
+        if (r === null) return { summary: {}, warnings: [], skipped: true };
+        if ("error" in r) return { summary: {}, warnings: [], errors: [r.error] };
+        st.pre = r.info;
+        st.context = { ...st.context, names: r.keep.map((j) => st.context.names[j]), values: r.keep.map((j) => st.context.values[j]) };
+        return { summary: preSummary(r.info), warnings: r.info.removed.length ? [mNote(r.info, st.params.multiplicity === "bh")] : [], detail: preDetail(r.info) };
       },
     },
     {
@@ -412,6 +473,17 @@ export interface P4State {
 
 const WHERE_JA = { pre: "交差検証の前", fold: "外側の分割", inner: "内側の分割", final: "最終モデル", finalInner: "最終モデルの内側の分割" } as const;
 
+/** p 値による除外の記録を、外側の分割ごとの要約にする（平らな値）。 */
+function pdropSummary(log: PDropEntry[] | null): Record<string, string | number | null> {
+  if (!log) return {};
+  const outer = log.filter((e) => /^r\d+f\d+$/.test(e.scope)), inner = log.filter((e) => e.scope.includes(".i"));
+  const mean = (xs: PDropEntry[]) => (xs.length ? Number((xs.reduce((a, e) => a + e.dropped.length, 0) / xs.length).toFixed(3)) : null);
+  return { pdropOuterEntries: outer.length, pdropOuterMeanDropped: mean(outer), pdropInnerEntries: inner.length, pdropInnerMeanDropped: mean(inner) };
+}
+
+/** 記録の詳細: 訓練の行ごとに、落とした特徴量・検定の選択の件数。 */
+const pdropDetail = (log: PDropEntry[]) => log.map((e) => ({ scope: e.scope, nTrain: e.nTrain, tested: e.tested, kept: e.kept, tests: e.tests, dropped: e.dropped.map((x) => ({ feature: x.feature, test: x.test, p: x.p })) }));
+
 const fmt = (v: number | null) => (v === null ? null : Number(v.toFixed(6)));
 
 export const P4_PIPELINE: Skill = {
@@ -433,7 +505,7 @@ export const P4_PIPELINE: Skill = {
         if (!d) return { summary: {}, warnings: [], errors: ["データセットがありません"] };
         const pr = readP4Params(ctx.params);
         if ("error" in pr) return { summary: {}, warnings: [], errors: [pr.error] };
-        const c = await buildCohort(d, pr);
+        const c = await buildCohort(d, pr, (ctx.state.delta as DeltaResult | undefined) ?? null);
         if ("error" in c) return { summary: {}, warnings: [], errors: [c.error] };
         ctx.state.p4 = { params: pr, cohort: c, split: null, qc: null, names: [], X: [], spec: null, cv: null, final: null, test: null, leak: null } satisfies P4State;
         const left = d.ids.length - c.ids.length;
@@ -483,13 +555,15 @@ export const P4_PIPELINE: Skill = {
         const spec = specOf(st.cohort, q.dev, st.params, q.impute);
         const bad = checkSpec(spec, q.dev.length);
         if (bad) return { summary: {}, warnings: [], errors: [bad] };
+        if (st.params.pre.unpaired) spec.pdrop = { alpha: st.params.pre.unpaired.alpha, threshold: st.params.pre.unpaired.threshold, names: st.names, log: [] };
         st.spec = spec;
         const warnings: string[] = [];
+        if (q.paired) warnings.push(`対応ありの p 値による除外で特徴量を ${q.removed.filter((r) => r.reason.startsWith("対応あり")).length} 個除きました（一覧は結果にあります）`);
         if (q.unknownExcluded.length) warnings.push(`除外リストにあるが表に無い特徴量が ${q.unknownExcluded.length} 個あります: ${q.unknownExcluded.slice(0, 5).join(", ")}`);
         if (q.droppedDev.length) warnings.push(`欠損のある開発集合の症例 ${q.droppedDev.length} 人を除きました（一覧は結果にあります）`);
         if (st.names.length > q.dev.length) warnings.push(`特徴量の数（${st.names.length}）が開発集合の症例数（${q.dev.length}）より多く、性能の見積もりの偏りが大きくなりやすい状況です`);
         return {
-          summary: { featuresBefore: st.cohort.names.length, featuresKept: st.names.length, removed: q.removed.length, excludeList: exclude ? exclude.length : null, missingCells: q.missingCells, missing: st.params.missing, droppedDev: q.droppedDev.length, dev: q.dev.length, ratio: Number((q.dev.length / st.names.length).toFixed(3)) },
+          summary: { featuresBefore: st.cohort.names.length, featuresKept: st.names.length, removed: q.removed.length, pairedAlpha: st.params.pre.paired?.alpha ?? null, pairedThreshold: st.params.pre.paired?.threshold ?? null, pairedTests: q.paired ? Object.entries(q.paired.tests).map(([k, v]) => `${k}:${v}`).join(" ") : null, assumptionAlpha: q.assumptions?.alpha ?? null, assumptionTests: q.assumptions ? Object.entries(testCounts(q.assumptions.rows)).map(([k, v]) => `${k}:${v}`).join(" ") : null, excludeList: exclude ? exclude.length : null, missingCells: q.missingCells, missing: st.params.missing, droppedDev: q.droppedDev.length, dev: q.dev.length, ratio: Number((q.dev.length / st.names.length).toFixed(3)) },
           warnings,
         };
       },
@@ -502,6 +576,7 @@ export const P4_PIPELINE: Skill = {
         const trace = new RowTrace();
         st.spec!.trace = trace;
         if (st.qc!.usedRows.length) trace.note("qc", st.qc!.usedRows);
+        if (st.qc!.pairedRows.length) trace.note("pdropPaired", st.qc!.pairedRows);
         const cv = await nestedCv(st.X, st.cohort.task, st.qc!.dev, st.spec!, ctx.rng, ctx.tick);
         st.cv = cv;
         const failed = cv.folds.filter((f) => f.score === null).length;
@@ -513,7 +588,9 @@ export const P4_PIPELINE: Skill = {
             grid: st.params.ml ? gridText(st.params.ml) : null, gridSize: st.params.ml ? gridOf(st.params.ml).length : null, fits: fitCount(st.params),
             mean: fmt(cv.summary.mean), min: fmt(cv.summary.min), max: fmt(cv.summary.max), valid: cv.summary.valid, total: cv.summary.total,
             pooledMean: pooled.length ? fmt(pooled.reduce((a, b) => a + b, 0) / pooled.length) : null,
+            ...pdropSummary(st.spec!.pdrop?.log.filter((e) => e.scope !== "final" && !e.scope.startsWith("final.")) ?? null),
           },
+          ...(st.spec!.pdrop ? { detail: { pdrop: pdropDetail(st.spec!.pdrop.log.filter((e) => /^r\d+f\d+$/.test(e.scope))) } } : {}),
           warnings: failed ? [`${failed} 個の分割は評価できませんでした（理由は結果の表にあります。0 や 0.5 にはしていません）`] : [],
         };
       },
@@ -525,19 +602,24 @@ export const P4_PIPELINE: Skill = {
         const st = ctx.state.p4 as P4State;
         const fm = finalModel(st.X, st.cohort.task, st.qc!.dev, st.spec!, ctx.rng);
         st.final = fm;
-        if (fm.error) return { summary: { k: fm.choice.k, lambda: fm.choice.lambda, params: hyperText(fm.choice.params ?? null) || null }, warnings: [`最終モデルを作れませんでした: ${fm.error}`] };
+        const fin = st.spec!.pdrop?.log.filter((e) => e.scope === "final") ?? null;
+        const pd = st.spec!.pdrop ? { detail: { pdrop: pdropDetail(fin ?? []) } } : {};
+        const droppedFinal = fin?.[0]?.dropped.length ?? null;
+        if (fm.error) return { summary: { k: fm.choice.k, lambda: fm.choice.lambda, params: hyperText(fm.choice.params ?? null) || null, pdropDropped: droppedFinal }, warnings: [`最終モデルを作れませんでした: ${fm.error}`], ...pd };
         const m = fm.model!;
         if (st.params.ml) {
           const top = (m.importance ?? []).map((v, a) => ({ n: st.names[m.cols[a]], v })).sort((x, y) => y.v - x.v).slice(0, 5);
           return {
-            summary: { k: fm.choice.k, params: hyperText(fm.choice.params ?? null), resolved: hyperText(m.resolved ?? null), output: m.output ?? "probability", importanceTop: top.length ? top.map((x) => `${x.n}:${fmt(x.v)}`).join(" ") : null },
+            summary: { k: fm.choice.k, params: hyperText(fm.choice.params ?? null), resolved: hyperText(m.resolved ?? null), output: m.output ?? "probability", importanceTop: top.length ? top.map((x) => `${x.n}:${fmt(x.v)}`).join(" ") : null, pdropDropped: droppedFinal },
             warnings: m.output === "decision" ? ["SVM の出力は決定値で、確率ではありません（較正は該当しません）"] : [],
+            ...pd,
           };
         }
         const none = m.cols.length === 0;
         return {
-          summary: { k: fm.choice.k, lambda: fm.choice.lambda, features: m.cols.map((j) => st.names[j]).join(" + ") },
+          summary: { k: fm.choice.k, lambda: fm.choice.lambda, features: m.cols.map((j) => st.names[j]).join(" + "), pdropDropped: droppedFinal },
           warnings: none ? ["選んだ λ では係数がすべて 0 です（特徴量を使わないモデル。予測はどの症例でも同じ値になります）"] : [],
+          ...pd,
         };
       },
     },
@@ -592,6 +674,10 @@ export const P4_PIPELINE: Skill = {
 };
 
 export interface R5State {
+  /** 前処理の結果（対応ありの除外を有効にしたときだけ）。 */
+  pre: PreInfo | null;
+  /** 使う特徴量の dataset の列番号（前処理で減らす。何も除かなければ全部）。 */
+  cols: number[];
   params: R5Params;
   cohort: SurvivalCohort;
   /** 対象の患者 ID（cohort.patients の並び）。 */
@@ -614,7 +700,7 @@ export const R5_MODEL: Skill = {
     "Harrell FE et al. Stat Med 1996 (PMID 8668867)",
     "Grambsch PM, Therneau TM. Biometrika 1994 (doi 10.1093/biomet/81.3.515)",
   ],
-  defaults: { ...DATASET_CHECK.defaults, ...R5_DEFAULTS },
+  defaults: { ...DATASET_CHECK.defaults, ...R5_DEFAULTS, ...PRE_PAIRED_DEFAULTS },
   steps: [
     ...DATASET_CHECK.steps,
     {
@@ -627,7 +713,7 @@ export const R5_MODEL: Skill = {
         if ("error" in pr) return { summary: {}, warnings: [], errors: [pr.error] };
         const cohort = survivalCohort(d);
         if ("error" in cohort) return { summary: {}, warnings: [], errors: [cohort.error] };
-        ctx.state.r5 = { params: pr, cohort, ids: cohort.patients.map((i) => d.ids[i]), names: d.featureNames, model: null, split: null } satisfies R5State;
+        ctx.state.r5 = { pre: null, cols: d.featureNames.map((_, j) => j), params: pr, cohort, ids: cohort.patients.map((i) => d.ids[i]), names: d.featureNames, model: null, split: null } satisfies R5State;
         const events = cohort.surv.event.reduce((a, b) => a + b, 0);
         const warnings: string[] = [];
         if (d.ids.length - cohort.patients.length > 0) warnings.push(`時間かイベントが欠けている患者 ${d.ids.length - cohort.patients.length} 人を除きました`);
@@ -636,12 +722,29 @@ export const R5_MODEL: Skill = {
       },
     },
     {
+      id: "pre",
+      title: PRE_TITLE,
+      run(ctx): StepOutcome {
+        const st = ctx.state.r5 as R5State;
+        const d = ctx.state.dataset as Dataset;
+        const values = st.names.map((_, j) => st.cohort.patients.map((i) => d.features[i][j]));
+        // 分散 0・相関は、R5 では手順の中（ブートストラップごと）で行う
+        const r = cohortPre(ctx, { qc: false, paired: true, unpaired: false, assumption: false }, st.names, values, st.cohort.patients, null, false);
+        if (r === null) return { summary: {}, warnings: [], skipped: true };
+        if ("error" in r) return { summary: {}, warnings: [], errors: [r.error] };
+        st.pre = r.info;
+        st.cols = r.keep;
+        st.names = r.keep.map((j) => d.featureNames[j]);
+        return { summary: preSummary(r.info), warnings: r.info.removed.length ? [mNote(r.info, false)] : [], detail: preDetail(r.info) };
+      },
+    },
+    {
       id: "r5-model",
       title: { ja: "選択・モデル・補正 C-index・比例ハザードの確認", en: "Selection, model, corrected C-index and proportional hazards" },
       async run(ctx): Promise<StepOutcome> {
         const st = ctx.state.r5 as R5State;
         const d = ctx.state.dataset as Dataset;
-        const values = st.names.map((_, j) => st.cohort.patients.map((i) => d.features[i][j]));
+        const values = st.cols.map((j) => st.cohort.patients.map((i) => d.features[i][j]));
         const m = await r5Model(st.cohort.surv, values, st.names, st.params, ctx.rng, ctx.tick);
         if ("error" in m) return { summary: {}, warnings: [], errors: [m.error] };
         st.model = m;

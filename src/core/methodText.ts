@@ -179,6 +179,50 @@ function r5Lines(record: RunRecord, locale: Locale): string[] {
 }
 
 /** 行の絞り込み・平均・リーク検査の記録から作る文。 */
+/** 前処理（段 B3）の方法の文。有効にした手順だけを書く（何も有効でなければ空）。 */
+function preLines(record: RunRecord, locale: Locale): string[] {
+  const ja = locale === "ja";
+  const L: string[] = [];
+  const testsText = (v: unknown) => (typeof v === "string" && v ? v : null);
+  // R1・R2・R5: 解析の前の「pre」の手順
+  const pre = record.steps.find((x) => x.id === "pre" && x.status === "ok");
+  if (pre) {
+    const m = pre.summary;
+    const parts: string[] = [];
+    if (m.dropConstant) parts.push(ja ? "値が 1 種類しかない特徴量の除外" : "removal of features with a single value");
+    if (m.correlationThreshold !== null) parts.push(ja ? `|Spearman の ρ| ≥ ${m.correlationThreshold} の組の片方の除外（欠損の少ない方、同じなら列の順が先の方を残す）` : `removal of one feature of each pair with |Spearman's rho| >= ${m.correlationThreshold} (keeping the one with fewer missing values, then the earlier column)`);
+    if (m.pairedThreshold !== null) parts.push(ja
+      ? `対応のある前後の値の検定による除外（差の Shapiro–Wilk の p が α = ${m.pairedAlpha} 以上なら対応のある t 検定、そうでなければ Wilcoxon の符号順位検定を選び、p ≥ ${m.pairedThreshold} の特徴量を除いた。選ばれた検定: ${testsText(m.pairedTests) ?? "—"}）`
+      : `removal by a paired test of the before and after values (paired t-test if the Shapiro–Wilk p of the differences was at least alpha = ${m.pairedAlpha}, otherwise the Wilcoxon signed-rank test; features with p >= ${m.pairedThreshold} were removed; tests chosen: ${testsText(m.pairedTests) ?? "-"})`);
+    if (m.assumptionAlpha !== null) parts.push(ja
+      ? `2 群の前提の検定の報告（各群の Shapiro–Wilk と群間の Levene（median）。α = ${m.assumptionAlpha}。報告だけで結果は変えていない）`
+      : `a report of the two-group assumption tests (Shapiro–Wilk in each group and Levene (median) between groups; alpha = ${m.assumptionAlpha}; a report only, results unchanged)`);
+    if (parts.length) L.push(ja
+      ? `解析の前に、患者ごとの特徴量に対して次の前処理を行った: ${parts.join("、")}。特徴量は ${m.featuresBefore} 個から ${m.featuresAfter} 個になった（分散 0 で ${m.removedConstant} 個、相関で ${m.removedCorrelation} 個、対応ありの検定で ${m.removedPaired} 個を除外${m.removedList ? `。除外: ${m.removedList}` : ""}）。多重比較の補正の対象の数は、除外の後の特徴量で数えた。`
+      : `Before the analysis, the following preprocessing was applied to the per-patient features: ${parts.join("; ")}. The number of features went from ${m.featuresBefore} to ${m.featuresAfter} (${m.removedConstant} removed as constant, ${m.removedCorrelation} by correlation, ${m.removedPaired} by the paired test${m.removedList ? `; removed: ${m.removedList}` : ""}). The number of comparisons for the multiplicity correction counts the features after the removal.`);
+  }
+  // P4: 品質管理の手順と、交差検証の内側の p 値による除外
+  const qc = record.steps.find((x) => x.id === "p4-qc" && x.status === "ok");
+  if (qc) {
+    const q = qc.summary;
+    if (typeof q.pairedThreshold === "number") L.push(ja
+      ? `開発集合の症例について、対応のある前後の値の検定（差の Shapiro–Wilk の p が α = ${q.pairedAlpha} 以上なら対応のある t 検定、そうでなければ Wilcoxon の符号順位検定）を行い、p ≥ ${q.pairedThreshold} の特徴量を除いた（選ばれた検定: ${testsText(q.pairedTests) ?? "—"}）。結果ラベルは使っていないが、開発集合の全症例の値を読んでいる。`
+      : `On the development cases, a paired test of the before and after values (paired t-test if the Shapiro–Wilk p of the differences was at least alpha = ${q.pairedAlpha}, otherwise the Wilcoxon signed-rank test) removed the features with p >= ${q.pairedThreshold} (tests chosen: ${testsText(q.pairedTests) ?? "-"}). The outcome labels were not used, but the values of all development cases were read.`);
+    if (typeof q.assumptionAlpha === "number") L.push(ja
+      ? `開発集合で、2 群の前提の検定（各群の Shapiro–Wilk と群間の Levene（median）、α = ${q.assumptionAlpha}）を特徴量ごとに報告した（選ばれる検定: ${testsText(q.assumptionTests) ?? "—"}）。報告だけで結果は変えていない。`
+      : `On the development set, the two-group assumption tests (Shapiro–Wilk in each group and Levene (median) between groups; alpha = ${q.assumptionAlpha}) were reported per feature (tests that would be chosen: ${testsText(q.assumptionTests) ?? "-"}). A report only; results unchanged.`);
+  }
+  const cv = record.steps.find((x) => x.id === "p4-cv" && x.status === "ok");
+  const un = record.params.preUnpairedOn === true && record.params.outcomeKind === "binary" && cv && cv.summary.pdropOuterEntries !== undefined;
+  if (un && cv) {
+    const fin = record.steps.find((x) => x.id === "p4-final");
+    L.push(ja
+      ? `対応なしの p 値による除外: 交差検証の各訓練の行の内側（外側の各分割の訓練側、内側の各分割の訓練側、最終モデルの開発集合）だけで、各群の Shapiro–Wilk の p が α = ${record.params.preUnpairedAlpha} 以上なら正規とし、正規で Levene（median）の p が α 以上なら Student、そうでなければ Welch、正規でなければ Mann–Whitney の検定を選び、p ≥ ${record.params.preUnpairedThr} の特徴量を除いた。検証側の行は読んでいない。除外数の平均は、外側の訓練 ${cv.summary.pdropOuterEntries} 回で ${cv.summary.pdropOuterMeanDropped}、内側の訓練 ${cv.summary.pdropInnerEntries} 回で ${cv.summary.pdropInnerMeanDropped}、最終モデルで ${fin?.summary.pdropDropped ?? "?"} であった。`
+      : `P-value filter (unpaired): inside each training set of the cross-validation only (the training side of every outer fold, of every inner fold, and the development set for the final model), normality was accepted if the Shapiro–Wilk p in each group was at least alpha = ${record.params.preUnpairedAlpha}; Student's t-test was chosen if normal and the Levene (median) p was at least alpha, Welch's t-test if normal otherwise, and the Mann–Whitney test if not normal; features with p >= ${record.params.preUnpairedThr} were removed. Validation rows were not read. The mean number removed was ${cv.summary.pdropOuterMeanDropped} over ${cv.summary.pdropOuterEntries} outer training sets, ${cv.summary.pdropInnerMeanDropped} over ${cv.summary.pdropInnerEntries} inner training sets, and ${fin?.summary.pdropDropped ?? "?"} for the final model.`);
+  }
+  return L;
+}
+
 function dataLines(record: RunRecord, locale: Locale): string[] {
   const ja = locale === "ja";
   const L: string[] = [];
@@ -224,7 +268,7 @@ export function methodText(record: RunRecord, skill: Skill, locale: Locale): str
       lines.push("欠損は 0 で補わず、欠損のまま扱った（複数病変の平均は欠損を除いて求めた）。");
     }
     lines.push(...dataLines(record, "ja"));
-    lines.push(...r1Lines(record, "ja"), ...r2Lines(record, "ja"), ...r3Lines(record, "ja"), ...p4Lines(record, "ja"), ...r5Lines(record, "ja"));
+    lines.push(...preLines(record, "ja"), ...r1Lines(record, "ja"), ...r2Lines(record, "ja"), ...r3Lines(record, "ja"), ...p4Lines(record, "ja"), ...r5Lines(record, "ja"));
     lines.push(`乱数シード: ${record.seed}。${changed.length ? `既定値から変更した設定: ${changed.join("、")}。` : "設定は既定値のままであった。"}`);
     lines.push("研究用であり、診断・治療の判断に用いない。");
   } else {
@@ -237,7 +281,7 @@ export function methodText(record: RunRecord, skill: Skill, locale: Locale): str
       lines.push("Missing values were not filled with 0 and were kept missing (the mean over several lesions ignores missing values).");
     }
     lines.push(...dataLines(record, "en"));
-    lines.push(...r1Lines(record, "en"), ...r2Lines(record, "en"), ...r3Lines(record, "en"), ...p4Lines(record, "en"), ...r5Lines(record, "en"));
+    lines.push(...preLines(record, "en"), ...r1Lines(record, "en"), ...r2Lines(record, "en"), ...r3Lines(record, "en"), ...p4Lines(record, "en"), ...r5Lines(record, "en"));
     lines.push(`Random seed: ${record.seed}. ${changed.length ? `Settings changed from the defaults: ${changed.join("; ")}.` : "All settings were the defaults."}`);
     lines.push("For research use only; not for diagnostic or treatment decisions.");
   }

@@ -27,6 +27,9 @@ import { r2Panel } from "./r2View";
 import { r1Panel } from "./r1View";
 import { suggestColumns } from "../core/suggest";
 import { download, h } from "./dom";
+import { assumptionsCsv, pdropCsv } from "../core/exportPre";
+import { needsStandardization, type ScaleModel } from "../core/stats/standardize";
+import { assumptionView, preResultView } from "./preView";
 import { makeT, type Key } from "./i18n";
 import { CSS } from "./style";
 
@@ -113,7 +116,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
   const render = () => {
     const r3 = isR3();
     // 前処理の区画（段 B3）は、③ と ④ の間に挿す
-    const sections: (Section | null)[] = [filesSection(), checkSection(), skillSection(), runSection(r3), s.result ? resultSection(s.result) : null];
+    const sections: (Section | null)[] = [filesSection(), checkSection(), skillSection(), preSection(), runSection(r3), s.result ? resultSection(s.result) : null];
     let n = 0;
     wrap.replaceChildren(
       h("div", { class: "rs-banner", "data-testid": "rs-banner" }, t("banner")),
@@ -549,6 +552,53 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     };
   }
 
+  // ③ の次: 前処理 ---------------------------------------------------------------------------
+
+  /** Skill ごとに、使える手順だけを出す（使えない手順は出さない）。R3 は区画ごと出さない。 */
+  function preSection(): Section | null {
+    const id = s.skill?.id;
+    if (!id || id === R3_REPRODUCIBILITY.id || !(s.check.status === "done" && s.check.ok)) return null;
+    const p = s.params;
+    const hasPair = s.baseline.length > 0 && s.followup.length > 0;
+    const binary = id === R2_DISCRIMINATION.id || (id === P4_PIPELINE.id && p.outcomeKind === "binary");
+    const rows: (HTMLElement | null)[] = [h("div", { class: "rs-note" }, t("preIntro"))];
+    const ab = (on: string, a: string, th: string | null, keys: [string, string, string], labels: [Key, Key, Key], tip: Key) => {
+      const out: (HTMLElement | null)[] = [checkRow(on, t(labels[0]), keys[0], tip)];
+      if (p[keys[0]] === true) {
+        out.push(numberRow(a, t(labels[1]), keys[1], { step: 0.01, min: 0.0001, max: 0.9999, emptyIsNull: true }, "tipAlpha"));
+        if (th) out.push(numberRow(th, t(labels[2]), keys[2], { step: 0.01, min: 0.0001, max: 1, emptyIsNull: true }, "tipThr"));
+      }
+      return out;
+    };
+    // 分散 0・相関（目的変数を使わない）。P4・R5 は既存の data-testid のまま
+    if (id === R5_MODEL.id) rows.push(h("div", { class: "rs-note", "data-testid": "rs-pre-const-fixed" }, t("preConstFixed")));
+    else rows.push(checkRow(id === P4_PIPELINE.id ? "rs-p4-const" : "rs-pre-const", t(id === P4_PIPELINE.id ? "p4Const" : "preConst"), "dropConstant", "tipConst"));
+    rows.push(id === R5_MODEL.id
+      ? numberRow("rs-r5-corr", t("r5Corr"), "r5Corr", { step: 0.01, min: 0.5, max: 1, emptyIsNull: true }, "tipCorr")
+      : numberRow(id === P4_PIPELINE.id ? "rs-p4-corr" : "rs-pre-corr", t(id === P4_PIPELINE.id ? "p4Corr" : "preCorr"), "correlationThreshold", { step: 0.01, min: 0.5, max: 1, emptyIsNull: true }, "tipCorr"));
+    // 標準化（自動。切り替えは無い）
+    if (id === P4_PIPELINE.id) {
+      const sm: Record<string, ScaleModel> = { topk: "logistic", lasso: "lasso", rf: "rf", svm: "svm", gbm: "gbm" };
+      const model = typeof p.model === "string" && p.model in sm ? p.model : "topk";
+      const need = needsStandardization(sm[model]);
+      rows.push(h("div", { class: "rs-note", "data-testid": "rs-pre-std", "data-need": String(need) }, t(need ? "preStdNeed" : "preStdNo", { model: t(({ topk: "mTopk", lasso: "mLasso", rf: "mRf", svm: "mSvm", gbm: "mGbm" } as const)[model as "topk"]) }), tipOf("tipStd", "rs-pre-std")));
+    }
+    if (id === R5_MODEL.id) rows.push(h("div", { class: "rs-note", "data-testid": "rs-pre-std", "data-need": "true" }, t("preStdR5"), tipOf("tipStd", "rs-pre-std")));
+    // 正規性・等分散性の報告（2 群）
+    if (binary) rows.push(...ab("rs-pre-assump-on", "rs-pre-assump-alpha", null, ["preAssumpOn", "preAssumpAlpha", ""], ["preAssump", "preAssumpAlpha", "preAssumpAlpha"], "tipAssump"));
+    // p 値による除外
+    if (hasPair) rows.push(...ab("rs-pre-paired-on", "rs-pre-paired-alpha", "rs-pre-paired-thr", ["prePairedOn", "prePairedAlpha", "prePairedThr"], ["prePaired", "prePairedAlpha", "prePairedThr"], "tipPaired"));
+    if (id === P4_PIPELINE.id && p.outcomeKind === "binary") {
+      rows.push(...ab("rs-pre-unpaired-on", "rs-pre-unpaired-alpha", "rs-pre-unpaired-thr", ["preUnpairedOn", "preUnpairedAlpha", "preUnpairedThr"], ["preUnpaired", "preUnpairedAlpha", "preUnpairedThr"], "tipUnpaired"));
+      if (p.preUnpairedOn === true) {
+        const ok = (v: ParamValue) => typeof v === "number" && Number.isInteger(v) && v >= 1;
+        const passes = ok(p.outerK) && ok(p.innerK) && ok(p.repeats) ? ((p.repeats as number) * (p.outerK as number) + 1) * ((p.innerK as number) + 1) : null;
+        rows.push(h("div", { class: "rs-note", "data-testid": "rs-pre-unpaired-cost" }, passes === null ? t("preUnpairedCostUnknown") : t("preUnpairedCost", { passes, m: usedFeatureColumns().length })));
+      }
+    }
+    return { id: "pre", title: t("secPre"), body: rows };
+  }
+
   const qc = (testId: string, text: string, bad: boolean) => h("div", { class: `rs-qc ${bad ? "rs-warn" : "rs-note"}`, "data-testid": testId }, text);
   const examples = (xs: string[]) => (xs.length ? t("qcExamples", { ex: xs.join(", ") }) : "");
 
@@ -618,10 +668,13 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
   }
 
 
-  function numberRow(testId: string, label: string, key: string, opts: { step?: number; min?: number; max?: number; emptyIsNull?: boolean }): HTMLElement {
+  /** ⓘ のツールチップ（説明は title と aria-label の両方に入れる）。 */
+  const tipOf = (tip: Key | undefined, testId: string) => (tip ? h("span", { class: "rs-info", title: t(tip), tabindex: "0", role: "img", "aria-label": t(tip), "data-testid": `${testId}-tip` }, "ⓘ") : null);
+
+  function numberRow(testId: string, label: string, key: string, opts: { step?: number; min?: number; max?: number; emptyIsNull?: boolean }, tip?: Key): HTMLElement {
     const v = s.params[key];
     return h("div", { class: "rs-row" },
-      h("label", {}, label),
+      h("label", {}, label, tipOf(tip, testId)),
       h("input", {
         type: "number", step: opts.step ?? "any", min: opts.min, max: opts.max, value: v === null || v === undefined ? "" : String(v), "data-testid": testId,
         onchange: (e: Event) => {
@@ -631,6 +684,11 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
           render();
         },
       }));
+  }
+
+  function checkRow(testId: string, label: string, key: string, tip?: Key): HTMLElement {
+    return h("div", { class: "rs-row" }, h("label", {}, label, tipOf(tip, testId)),
+      h("input", { type: "checkbox", checked: s.params[key] === true, "data-testid": testId, onchange: (e: Event) => { s.params = { ...s.params, [key]: (e.target as HTMLInputElement).checked }; s.result = null; render(); } }));
   }
 
   /** 結果ラベルの列にある値（陽性とするラベルの選択肢）。 */
@@ -731,8 +789,6 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     const more = compact([
       p.outcomeKind === "survival" ? choice("rs-p4-strat", t("p4Strat"), "stratifySurvival", [["true", t("stratYes")], ["false", t("stratNo")]], (v) => v === "true") : null,
       p.outcomeKind === "survival" ? numberRow("rs-p4-boot", t("p4Boot"), "testBootstrapB", { step: 100, min: 100 }) : null,
-      numberRow("rs-p4-corr", t("p4Corr"), "correlationThreshold", { step: 0.01, min: 0.5, max: 1, emptyIsNull: true }),
-      h("div", { class: "rs-row" }, h("label", {}, t("p4Const")), h("input", { type: "checkbox", checked: p.dropConstant === true, "data-testid": "rs-p4-const", onchange: (e: Event) => { s.params = { ...s.params, dropConstant: (e.target as HTMLInputElement).checked }; s.result = null; } })),
       fileBlock({
         testId: "rs-file-exclusion", label: t("exclFile"), multiple: false, items: s.exclusion ? tableItems([s.exclusion]) : [],
         onAdd: async (fs) => { s.exclusion = (await load(fs))[0] ?? s.exclusion; s.result = null; render(); },
@@ -773,7 +829,6 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     const choice = (testId: string, label: string, key: string, options: [string, string][], allowNone: boolean) => choiceRow(testId, label, key, options, allowNone ? { none: t("choose") } : {});
     const boost = p.r5Screen === "boost";
     const main = compact([
-      numberRow("rs-r5-corr", t("r5Corr"), "r5Corr", { step: 0.01, min: 0.5, max: 1, emptyIsNull: true }),
       choice("rs-r5-screen", t("r5Screen"), "r5Screen", [["boost", t("sBoost")], ["lasso", t("sLasso")]], false),
       boost ? numberRow("rs-r5-nu", t("r5Nu"), "r5BoostNu", { step: 0.01, min: 0.000001, max: 1, emptyIsNull: true }) : null,
       boost ? null : choice("rs-r5-rule", t("r5LassoRule"), "r5LassoRule", [["min", t("ruleMin")], ["1se", t("rule1se")]], true),
@@ -842,6 +897,8 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     const params: Record<string, ParamValue> = sanitizeRoles(rolesForSkill(skill.id, s.params), s.params);
     for (const k of Object.keys(params)) if (!(k in skill.defaults)) delete params[k];
     if (isP4) params.evaluateTest = evaluate;
+    // 前と後の表が無いなら、対応ありの除外は使えない（画面にも出していない）
+    if (!(s.baseline.length && s.followup.length) && "prePairedOn" in params) params.prePairedOn = false;
     s.cancelled = false;
     s.progress = { label: "", fraction: 0 };
     s.result = null;
@@ -897,6 +954,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       failed.length ? h("div", { class: "rs-err", "data-testid": "rs-errors" }, h("b", {}, t("errors")), h("ul", {}, ...failed.map((e) => h("li", {}, e)))) : null,
       warns.length ? h("div", { class: "rs-warn", "data-testid": "rs-warnings" }, h("b", {}, t("warnings")), h("ul", {}, ...warns.map((e) => h("li", {}, e)))) : null,
       r.p4 ? p4Panel(r.p4, t) : null,
+      r.r5 ? preResultView(r.r5.pre, t, "rs-pre-result") : null,
       r.r5 ? r5Panel(r.r5, t) : null,
       r.p4 && r.p4.final?.model && r.p4.params.lockMode === "use" && !r.p4.test && r.record.status === "ok"
         ? h("div", { "data-testid": "rs-p4-eval-box" },
@@ -904,7 +962,10 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
           h("div", { class: "rs-note" }, t("p4EvaluateNote")))
         : null,
       r.r3 && r.r3.rows.length ? r3Panel(r.r3, t, s.ba, (c) => { s.ba = c; render(); }) : null,
+      r.r2 ? preResultView(r.r2.pre, t, "rs-pre-result", r.r2.params.multiplicity === "bh") : null,
+      r.r2 ? assumptionView(r.r2.pre?.assumptions ?? null, t) : null,
       r.r2 && r.r2.rows.length ? r2Panel(r.r2, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
+      r.r1 ? preResultView(r.r1.pre, t, "rs-pre-result", r.r1.params.multiplicity === "bh") : null,
       r.r1 && r.r1.rows.length ? r1Panel(r.r1, t, s.selectedFeature, (name) => { s.selectedFeature = name; render(); }) : null,
       h("h3", {}, t("saveHead")),
       h("div", { class: "rs-row" },
@@ -924,6 +985,8 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         r.p4?.cv ? h("button", { "data-testid": "rs-save-p4-pred", onclick: () => download(p4PredictionsCsv(r.p4!), "research-stats-p4-predictions.csv", "text/csv;charset=utf-8") }, t("saveP4Pred")) : null,
         r.p4?.cv ? h("button", { "data-testid": "rs-save-p4-sel", onclick: () => download(p4SelectionCsv(r.p4!), "research-stats-p4-selection.csv", "text/csv;charset=utf-8") }, t("saveP4Sel")) : null,
         r.p4?.final?.model?.importance ? h("button", { "data-testid": "rs-save-p4-imp", onclick: () => download(p4ImportanceCsv(r.p4!), "research-stats-p4-importance.csv", "text/csv;charset=utf-8") }, t("saveP4Imp")) : null,
+        (r.r2?.pre?.assumptions ?? r.p4?.qc?.assumptions) ? h("button", { "data-testid": "rs-save-assumptions", onclick: () => { const a = (r.r2?.pre?.assumptions ?? r.p4?.qc?.assumptions)!; download(assumptionsCsv(a.rows, a.alpha), "research-stats-assumptions.csv", "text/csv;charset=utf-8"); } }, t("saveAssump")) : null,
+        r.p4?.spec?.pdrop ? h("button", { "data-testid": "rs-save-p4-pdrop", onclick: () => download(pdropCsv(r.p4!.spec!.pdrop!.log), "research-stats-p4-pdrop.csv", "text/csv;charset=utf-8") }, t("savePdrop")) : null,
         r.p4?.qc ? h("button", { "data-testid": "rs-save-p4-qc", onclick: () => download(p4QcCsv(r.p4!), "research-stats-p4-qc.csv", "text/csv;charset=utf-8") }, t("saveP4Qc")) : null,
         r.r5?.model ? h("button", { "data-testid": "rs-save-r5-model", onclick: () => download(r5ModelCsv(r.r5!), "research-stats-r5-model.csv", "text/csv;charset=utf-8") }, t("saveR5Model")) : null,
         r.r5?.model ? h("button", { "data-testid": "rs-save-r5-steps", onclick: () => download(r5StepsCsv(r.r5!), "research-stats-r5-steps.csv", "text/csv;charset=utf-8") }, t("saveR5Steps")) : null,

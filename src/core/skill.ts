@@ -29,6 +29,8 @@ export interface StepOutcome {
   errors?: string[];
   /** 何もしなかったとき（条件が合わない）に true。 */
   skipped?: boolean;
+  /** 記録に残す構造のある詳細（除外した特徴量と理由など。summary は平らな値だけなので別に持つ）。 */
+  detail?: Record<string, unknown>;
 }
 
 export interface StepContext {
