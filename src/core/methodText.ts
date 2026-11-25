@@ -104,6 +104,8 @@ function p4Lines(record: RunRecord, locale: Locale): string[] {
     ? `性能は、外側 ${p.outerK} 分割（${strat ? "層化" : "層化しない"}）× ${p.repeats} 回の入れ子の交差検証で見積もった。各訓練分割の中だけで${Number(qc.summary.missingCells) > 0 && p.missing === "impute" ? "、欠損の補完" : ""}と ${mlDesc(true)} の当てはめを行い、ハイパーパラメータは候補（${String(cv.summary.grid)}、${cv.summary.gridSize} 通り）から内側 ${p.innerK} 分割（層化しない）の交差検証（予測を束ねた AUC が最大、同じなら先の候補）で選んだ。特徴量の選択は行わず、使える特徴量をすべて用いた。実装は scikit-learn 1.9 と同じ定義で、乱数を使わない設定で値が一致することを確かめている（乱数は本ツールのシード付き乱数を使うため、scikit-learn と同じ乱数列にはならない）。`
     : `Performance was estimated by nested cross-validation with ${p.outerK} outer folds (${strat ? "stratified" : "not stratified"}) x ${p.repeats} repeat(s). Within each training split only${Number(qc.summary.missingCells) > 0 && p.missing === "impute" ? ", missing values were imputed and" : ""} ${mlDesc(false)} was fitted; hyperparameters were chosen from the candidates (${String(cv.summary.grid)}; ${cv.summary.gridSize} combinations) by ${p.innerK}-fold inner cross-validation (not stratified; highest pooled AUC, ties to the earlier candidate). No feature selection was done; all usable features were used. The implementation follows the definitions of scikit-learn 1.9 and matches it in settings without randomness (the random numbers come from this tool's seeded generator, so the random streams differ from scikit-learn's).`;
   const sha = (v: unknown) => (typeof v === "string" ? v.slice(0, 12) : "?");
+  const asis = co.summary.rowsMode === "asis";
+  const nTest = asis ? sp.summary.testPatients : sp.summary.test, nDev = asis ? sp.summary.devPatients : sp.summary.dev;
   const qcParts = (ja: boolean) => [
     p.dropConstant ? (ja ? "値が 1 種類しかない特徴量の除外" : "removal of features with a single value") : null,
     p.correlationThreshold !== null ? (ja ? `|Spearman の ρ| ≥ ${num(p.correlationThreshold)} の組の片方の除外（欠損の少ない方、同じなら列の順が先の方を残す）` : `removal of one feature of each pair with |Spearman's rho| >= ${num(p.correlationThreshold)} (keeping the one with fewer missing values, then the earlier column)`) : null,
@@ -112,8 +114,9 @@ function p4Lines(record: RunRecord, locale: Locale): string[] {
   const L: string[] = [];
   if (locale === "ja") {
     L.push(bin ? `結果ラベル「${p.positiveLabel}」を陽性とし、${co.summary.patients} 人（陽性 ${co.summary.positivesOrEvents} 人）を対象とした。` : `時間とイベントが揃った ${co.summary.patients} 人（イベント ${co.summary.positivesOrEvents} 件）を対象とした。`);
+    if (asis) L.push(`同じ患者の行は平均せず、1 行 = 1 観測のまま使った（${co.summary.rows} 行・${co.summary.patients} 人、患者あたり ${co.summary.rowsPerPatientMin}〜${co.summary.rowsPerPatientMax} 行。患者でグループ化）。テスト集合の分離と、交差検証の外側・内側の分割${lasso ? "・LASSO の λ を選ぶ分割" : ""}は患者単位で行い（同じ患者の行は必ず同じ側）、層化は患者の結果で行った。性能（${bin ? "AUC" : "C-index"}）は、行ごとの予測を患者ごとに平均して 1 患者 = 1 点で評価した。品質管理・p 値による除外・特徴量の順位付け・当てはめは行を単位に計算した（同じ患者の行は独立でない）。`);
     if (p.lockMode === "none") L.push("テスト集合は設けず、交差検証による推定だけを示す。");
-    else L.push(`${strat ? (bin ? "結果ラベルで層化した" : "イベントの有無で層化した") : "層化しない"}無作為抽出により ${sp.summary.test} 人をテスト集合とし、欠損の補完・標準化・特徴量の選択・モデルの選択の前に分けて、テスト集合の固定ファイル（SHA-256 ${sha(sp.summary.lockSha256)}）に記録した。残る ${sp.summary.dev} 人を開発集合とした。`);
+    else L.push(`${strat ? (bin ? "結果ラベルで層化した" : "イベントの有無で層化した") : "層化しない"}無作為抽出により ${nTest} 人をテスト集合とし、欠損の補完・標準化・特徴量の選択・モデルの選択の前に分けて、テスト集合の固定ファイル（SHA-256 ${sha(sp.summary.lockSha256)}）に記録した。残る ${nDev} 人を開発集合とした。`);
     const qp = qcParts(true);
     L.push(`${qp.length ? `開発集合の値だけを使って、${qp.join("、")}を行い（除いた特徴量 ${qc.summary.removed} 個）、` : ""}${qc.summary.featuresKept} 個の特徴量を用いた（開発集合の症例数 / 特徴量の数 = ${num(qc.summary.ratio)}）。`);
     if (Number(qc.summary.missingCells) > 0) L.push(p.missing === "impute" ? "欠損は、各訓練分割の中央値で補った（検証・テストの症例には訓練分割の中央値を当てた）。0 では補っていない。" : `欠損のある開発集合の症例 ${qc.summary.droppedDev} 人を除いた（完全症例）。`);
@@ -129,8 +132,9 @@ function p4Lines(record: RunRecord, locale: Locale): string[] {
     if (te) L.push(`テスト集合（${te.summary.n} 人）で最終モデルを評価し、${bin ? `AUC ${num(te.summary.value)}（DeLong 法の 95% 信頼区間 ${num(te.summary.lower)}–${num(te.summary.upper)}）` : `C-index ${num(te.summary.value)}（ブートストラップ ${p.testBootstrapB} 回のパーセンタイル 95% 信頼区間 ${num(te.summary.lower)}–${num(te.summary.upper)}）`}を得た。このテスト集合での評価は ${te.summary.evaluation} 回目である。${te.summary.output === "decision" ? "SVM の出力は確率ではないため、較正は示していない。" : ""}`);
   } else {
     L.push(bin ? `"${p.positiveLabel}" was the positive outcome; ${co.summary.patients} patients (${co.summary.positivesOrEvents} positive) were included.` : `${co.summary.patients} patients with time and event (${co.summary.positivesOrEvents} events) were included.`);
+    if (asis) L.push(`Rows of the same patient were not averaged; each row was one observation (${co.summary.rows} rows, ${co.summary.patients} patients, ${co.summary.rowsPerPatientMin} to ${co.summary.rowsPerPatientMax} rows per patient; grouped by patient). The test-set split and the outer and inner cross-validation folds${lasso ? " (and the folds that choose the LASSO lambda)" : ""} were made by patient (all rows of a patient on the same side) and stratified by the patient's outcome. Performance (${bin ? "AUC" : "C-index"}) was computed on the per-patient mean of the row-level predictions (one point per patient). Quality control, p-value filtering, feature ranking and model fitting were computed per row (rows of a patient are not independent).`);
     if (p.lockMode === "none") L.push("No test set was held out; only cross-validated estimates are reported.");
-    else L.push(`${sp.summary.test} patients were held out as a test set by ${strat ? (bin ? "random sampling stratified by outcome" : "random sampling stratified by event") : "unstratified random sampling"} before any imputation, standardisation, feature selection or model selection, and recorded in a test-set lock file (SHA-256 ${sha(sp.summary.lockSha256)}). The remaining ${sp.summary.dev} patients formed the development set.`);
+    else L.push(`${nTest} patients were held out as a test set by ${strat ? (bin ? "random sampling stratified by outcome" : "random sampling stratified by event") : "unstratified random sampling"} before any imputation, standardisation, feature selection or model selection, and recorded in a test-set lock file (SHA-256 ${sha(sp.summary.lockSha256)}). The remaining ${nDev} patients formed the development set.`);
     const qp = qcParts(false);
     L.push(`${qp.length ? `Using the development set only, quality control comprised ${qp.join("; ")} (${qc.summary.removed} features removed); ` : ""}${qc.summary.featuresKept} features were used (development cases / features = ${num(qc.summary.ratio)}).`);
     if (Number(qc.summary.missingCells) > 0) L.push(p.missing === "impute" ? "Missing values were imputed with the median of each training split (applied to the held-out cases as well); they were not filled with 0." : `${qc.summary.droppedDev} development cases with missing values were excluded (complete cases).`);
@@ -230,7 +234,10 @@ function dataLines(record: RunRecord, locale: Locale): string[] {
   if (join) {
     const f = join.summary.rowFilter;
     if (typeof f === "string") L.push(ja ? `特徴量の表の行を ${f.replace(/;/g, "、")} に絞り込んだ（外した行 ${join.summary.filteredRows} 行）。` : `Rows of the feature table were restricted to ${f.replace(/;/g, "; ")} (${join.summary.filteredRows} rows removed).`);
-    if (Number(join.summary.averagedPatients) > 0) L.push(ja
+    if (join.summary.rowsMode === "asis") L.push(ja
+      ? `特徴量の表の ${join.summary.rowsUsed} 行（${join.summary.patientsUsed} 人、患者あたり ${join.summary.lesionsMin}〜${join.summary.lesionsMax} 行）は、平均せず 1 行 = 1 観測のまま使った（患者でグループ化。臨床の値は患者の値を各行に写した）。`
+      : `The ${join.summary.rowsUsed} rows of the feature table (${join.summary.patientsUsed} patients; ${join.summary.lesionsMin} to ${join.summary.lesionsMax} rows per patient) were used as is, one observation per row (grouped by patient; each patient's clinical values were copied to its rows).`);
+    else if (Number(join.summary.averagedPatients) > 0) L.push(ja
       ? `同じ患者に複数の行がある ${join.summary.averagedPatients} 人（計 ${join.summary.averagedRows} 行、患者あたり ${join.summary.lesionsMin}〜${join.summary.lesionsMax} 行）は、欠損を除く平均で患者ごとに 1 行にまとめた。`
       : `For ${join.summary.averagedPatients} patients with several rows (${join.summary.averagedRows} rows in total; ${join.summary.lesionsMin} to ${join.summary.lesionsMax} rows per patient), the rows were averaged per patient, ignoring missing values.`);
     if (typeof join.summary.excludedFeatureColumns === "string") L.push(ja ? `特徴量から外した列: ${join.summary.excludedFeatureColumns}。` : `Columns excluded from the features: ${join.summary.excludedFeatureColumns}.`);

@@ -33,6 +33,8 @@ export interface LockBody {
   testFraction: number;
   /** 層化に使ったもの（"outcome"・"event"）。層化しなければ null。 */
   stratifiedBy: string | null;
+  /** 行のまま解析した固定ファイルだけ: ID・件数は患者の単位（1 患者に複数行）。平均の固定ファイルには無い。 */
+  unit?: "patient-grouped-rows";
   cohortFingerprint: string;
   cohortSize: number;
   /** 並べ替えた ID。 */

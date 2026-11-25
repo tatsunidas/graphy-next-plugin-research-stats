@@ -43,14 +43,18 @@ export function p4Panel(st: P4State, t: T): HTMLElement {
   const list = (title: string, xs: string[], testId: string) =>
     xs.length ? h("details", { "data-testid": testId }, h("summary", {}, `${title}（${xs.length}）`), h("ul", {}, ...xs.map((x) => h("li", {}, x)))) : null;
 
+  const gr = st.cohort.groups;
+  const units = (rows: number[]) => (gr ? new Set(rows.map((i) => gr[i])).size : rows.length);
+  const nDev = qc ? units(qc.dev) : 0, nTest = sp ? units(sp.test) : 0;
   const lockInfo = sp?.lock
     ? h("div", { class: sp.lockIsNew ? "rs-warn" : "rs-note", "data-testid": "rs-p4-lock-info" },
-      t("p4LockInfo", { sha: (te?.lock ?? sp.lock).sha256.slice(0, 12), n: sp.test.length, e: (te?.lock ?? sp.lock).evaluations.length }),
+      t("p4LockInfo", { sha: (te?.lock ?? sp.lock).sha256.slice(0, 12), n: nTest, e: (te?.lock ?? sp.lock).evaluations.length }),
       sp.lockIsNew ? h("div", {}, t("p4LockNewNote")) : null,
       h("div", { class: "rs-note" }, t("p4LockLimit")))
     : null;
 
-  const sizes = qc ? h("div", { class: "rs-big", "data-testid": "rs-p4-sizes" }, t("p4Sizes", { dev: qc.dev.length, test: sp?.test.length ?? 0, m: st.names.length, r: (qc.dev.length / st.names.length).toFixed(2) })) : null;
+  const sizes = qc ? h("div", { class: "rs-big", "data-testid": "rs-p4-sizes" }, t("p4Sizes", { dev: nDev, test: nTest, m: st.names.length, r: (nDev / st.names.length).toFixed(2) })) : null;
+  const rowsAsis = qc && gr ? h("div", { class: "rs-note", "data-testid": "rs-p4-rows-asis" }, t("p4RowsAsis", { dr: qc.dev.length, dp: nDev, tr: sp?.test.length ?? 0, tp: nTest })) : null;
 
   let cvView: HTMLElement | null = null;
   if (cv) {
@@ -113,7 +117,7 @@ export function p4Panel(st: P4State, t: T): HTMLElement {
 
   return h("div", { "data-testid": "rs-p4" },
     h("h2", {}, t("stepP4")),
-    lockInfo, sizes,
+    lockInfo, sizes, rowsAsis,
     qc ? list(t("p4Removed"), qc.removed.map((r) => `${r.feature}: ${r.reason}`), "rs-p4-removed") : null,
     qc ? list(t("p4Dropped"), qc.droppedDev, "rs-p4-dropped") : null,
     qc ? assumptionView(qc.assumptions, t) : null,

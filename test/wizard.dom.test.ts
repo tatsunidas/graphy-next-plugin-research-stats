@@ -418,3 +418,81 @@ describe("wizard: preprocessing section", () => {
     expect(q("rs-p4-leak-rows")!.getAttribute("data-level")).toBe("notice"); // 定数の除外が全行を読む（注意）。p 値による除外は訓練側だけ
   }, 100000);
 });
+
+// ---------------------------------------------------------------------------------------------
+// 行の扱い（同じ患者に複数行があるとき）: 既定は平均、「行のまま」は P4 だけ
+// ---------------------------------------------------------------------------------------------
+describe("wizard: how to treat several rows per patient", () => {
+  async function ready() {
+    await pickFile("rs-file-features", "feat.csv", preFeatureCsv(ids));
+    await pickFile("rs-file-clinical", "clin.csv", clinicalCsv("PatientID", ids));
+    await until(() => !!q("rs-check-pass"), "check pass");
+  }
+  const asisOption = () => Array.from((q("rs-rows-mode") as HTMLSelectElement).options).find((o) => o.value === "asis")!;
+
+  it("appears when a patient has several rows; 'rows as is' is disabled with a reason for R1, R2 and R5, and for no skill yet", async () => {
+    await ready();
+    expect(q("rs-rows-mode")).toBeTruthy();
+    expect((q("rs-rows-mode") as HTMLSelectElement).value).toBe("average"); // 既定は平均
+    expect(asisOption().disabled).toBe(true);
+    expect(q("rs-rows-mode-reason")!.textContent).toContain("P4");
+    for (const [skill, word] of [["r1-prognosis", "R1"], ["r2-discrimination", "R2"], ["r5-model", "R5"]] as const) {
+      await choose("rs-skill", skill);
+      expect(asisOption().disabled, skill).toBe(true);
+      const reason = q("rs-rows-mode-reason")!.textContent!;
+      expect(reason, skill).toContain(`${word} では選べません`);
+      expect(reason, skill).toContain("独立でない");
+    }
+    expect(q("rs-rows-mode-reason")!.textContent).toContain("別の大きな変更"); // R5 の理由
+    await choose("rs-skill", "p4-pipeline");
+    expect(asisOption().disabled).toBe(false);
+    expect(q("rs-rows-mode-reason")).toBeNull();
+  });
+
+  it("a table with one row per patient shows no row-mode choice", async () => {
+    await pickFile("rs-file-features", "feat.csv", featureCsv("PatientID", ids).split("\n").filter((l, r) => r === 0 || l.includes("_L0,")).join("\n") + "\n");
+    await pickFile("rs-file-clinical", "clin.csv", clinicalCsv("PatientID", ids));
+    await until(() => !!q("rs-check-pass"), "check pass");
+    expect(q("rs-rows-mode")).toBeNull();
+  });
+
+  it("P4: choosing 'rows as is' re-runs the check (rows and patients shown), keeps the analysis section, and runs from the default controls; it is recorded and the split check is OK", async () => {
+    await ready();
+    await choose("rs-skill", "p4-pipeline");
+    await choose("rs-rows-mode", "asis");
+    await until(() => !!q("rs-note-rows-asis"), "rows-as-is note");
+    expect(q("rs-note-rows-asis")!.textContent).toContain(`${2 * N} 行・${N} 人`);
+    expect(q("rs-note-averaged")).toBeNull();
+    expect(q("rs-joined")!.textContent).toContain(`${N} 人`);
+    expect((q("rs-rows-mode") as HTMLSelectElement).value).toBe("asis");
+    expect(q("rs-pre-rows-asis")!.textContent).toContain("行を単位に計算"); // p 値による除外などの注意
+    await choose("rs-p4-kind", "binary");
+    await choose("rs-positive", "resp");
+    await choose("rs-p4-lock", "none");
+    await setNumber("rs-p4-outer", "4"); await setNumber("rs-p4-inner", "3"); await setNumber("rs-p4-repeats", "1");
+    (q("rs-p4-k") as HTMLInputElement).value = "1, 2";
+    q("rs-p4-k")!.dispatchEvent(new Event("change"));
+    await choose("rs-p4-missing", "complete");
+    await toggle("rs-p4-const", true);
+    (q("rs-run") as HTMLButtonElement).click();
+    await until(() => !!q("rs-result") || !!q("rs-errors"), "result", 90000);
+    expect(q("rs-errors")?.textContent).toBeUndefined();
+    expect(q("rs-p4-rows-asis")!.textContent).toContain(`${2 * N} 行`);
+    expect(q("rs-p4-leak-split")!.className).toContain("rs-note"); // OK（NG なら rs-err）
+    expect(q("rs-p4-leak-split")!.textContent).not.toContain("分かれています");
+    expect(all("rs-p4-fold").length).toBe(4);
+  }, 100000);
+
+  it("switching to R1 after choosing 'rows as is' returns to the per-patient mean (nothing is passed to R1)", async () => {
+    await ready();
+    await choose("rs-skill", "p4-pipeline");
+    await choose("rs-rows-mode", "asis");
+    await until(() => !!q("rs-note-rows-asis"), "rows-as-is note");
+    await choose("rs-skill", "r1-prognosis");
+    await until(() => !q("rs-note-rows-asis"), "back to the mean");
+    expect((q("rs-rows-mode") as HTMLSelectElement).value).toBe("average");
+    (q("rs-run") as HTMLButtonElement).click();
+    await until(() => !!q("rs-result") || !!q("rs-errors"), "result", 60000);
+    expect(q("rs-errors")).toBeNull();
+  }, 70000);
+});
