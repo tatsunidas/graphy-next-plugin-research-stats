@@ -22,6 +22,8 @@ export interface LooResult {
   /** 特徴量ごとに、何回の折で選ばれたか。 */
   selectionCounts: number[];
   failed: number;
+  /** 選択が 0 個で、訓練データの陽性割合を予測にした折の数。 */
+  emptySelection: number;
 }
 
 /** idx の症例で特徴量を選ぶ。返すのは特徴量の番号（p の小さい順）。 */
@@ -66,14 +68,15 @@ export function looTopK(X: number[][], y: number[], opts: LooOptions): LooResult
   const counts = new Array<number>(m).fill(0);
   const outside = opts.selectInside ? null : selectTopK(X, y, all, opts.k, opts.alpha);
   const pred: (number | null)[] = [];
-  let failed = 0;
+  let failed = 0, emptySelection = 0;
   for (let i = 0; i < n; i++) {
     const train = all.filter((t) => t !== i);
     const cols = outside ?? selectTopK(X, y, train, opts.k, opts.alpha);
     for (const j of cols) counts[j]++;
+    if (!cols.length) emptySelection++;
     const f = fitOnColumns(X, y, train, cols);
     if (typeof f !== "function") { pred.push(null); failed++; continue; }
     pred.push(f(X[i]));
   }
-  return { pred, selectionCounts: counts, failed };
+  return { pred, selectionCounts: counts, failed, emptySelection };
 }

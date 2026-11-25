@@ -67,8 +67,9 @@ const R1 = { ...JOIN, ...SURV, covariates: ["Age", "Female"], bootstrapB: 500, p
 add({ id: "r1_median", skill: R1_PROGNOSIS, params: { ...R1, groupMode: "median" } });
 add({ id: "r1_tertile", skill: R1_PROGNOSIS, params: { ...R1, groupMode: "tertile", bootstrapB: 0 } });
 add({ id: "r1_optimal", skill: R1_PROGNOSIS, params: { ...R1, groupMode: "optimal", bootstrapB: 0 } });
-// 既定の alpha=0.05 では q<alpha が 34 個になり、15 イベントに 36 変数の多変量 Cox は特異で止まる。多変量が走るよう、BH のまま alpha=0.03 に下げた設定（5 個選ばれる）も走らせる
-add({ id: "r1_median_a03", skill: R1_PROGNOSIS, params: { ...R1, groupMode: "median", alpha: 0.03 } });
+// 既定の alpha=0.05 では q<alpha が 34 個になり、変数の上限（⌊15 ÷ 10⌋ = 1。共変量 2 個で埋まる）のため特徴量は多変量に入らない。
+// 共変量なし・alpha=0.03 では、上限の 1 変数に先頭の特徴量が入り、多変量 Cox と補正 C-index（上限つきの選択のやり直し）を参照と突き合わせられる。
+add({ id: "r1_median_a03", skill: R1_PROGNOSIS, params: { ...R1, covariates: [], groupMode: "median", alpha: 0.03 } });
 
 // R2
 const R2 = { ...JOIN, outcomeColumn: "EGFR", positiveLabel: "Mutant", covariates: [] as string[] };
@@ -133,7 +134,7 @@ for (const r of runs) {
       const s = state.r1 as R1State;
       tables.results = r1ResultsCsv(s.rows);
       tables.km = kmPointsCsv(s.context, s.rows);
-      extra.r1 = { patients: s.cohort.patients, model: s.model ? { selected: s.model.selected, covariates: s.model.covariates, nUsed: s.model.nUsed, eventsUsed: s.model.eventsUsed, terms: s.model.terms, addedValue: s.model.addedValue, cIndexApparent: s.model.cIndexApparent, corrected: s.model.corrected, notes: s.model.notes, error: s.model.error, loglik: s.model.fit?.loglik ?? null } : null, comparisons: s.comparisons };
+      extra.r1 = { patients: s.cohort.patients, model: s.model ? { selected: s.model.selected, screened: s.model.screened, notEntered: s.model.notEntered, maxVars: s.model.maxVars, covariates: s.model.covariates, nUsed: s.model.nUsed, eventsUsed: s.model.eventsUsed, terms: s.model.terms, addedValue: s.model.addedValue, cIndexApparent: s.model.cIndexApparent, corrected: s.model.corrected, notes: s.model.notes, error: s.model.error, loglik: s.model.fit?.loglik ?? null } : null, comparisons: s.comparisons };
     }
     if (state.r2) {
       const s = state.r2 as R2State;

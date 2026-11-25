@@ -11,9 +11,9 @@ const COLUMNS: [string, (r: FeatureResult) => number | string | null][] = [
   ["logrank_chi2", (r) => r.logrankChi2], ["logrank_p", (r) => r.logrankP],
   ["optimal_raw_p", (r) => r.rawOptimalP], ["optimal_permutation_p", (r) => r.correctedP],
   ["p_used", (r) => r.pUsed], ["q_bh", (r) => r.q],
-  ["hr_group", (r) => r.hrGroup], ["hr_group_lower", (r) => r.hrGroupLower], ["hr_group_upper", (r) => r.hrGroupUpper], ["hr_group_p", (r) => r.hrGroupP],
+  ["hr_group", (r) => r.hrGroup], ["hr_group_lower", (r) => r.hrGroupLower], ["hr_group_upper", (r) => r.hrGroupUpper], ["hr_group_p", (r) => r.hrGroupP], ["hr_group_note", (r) => r.hrGroupNote],
   ["hr_per_sd", (r) => r.hrPerSd], ["hr_per_sd_lower", (r) => r.hrPerSdLower], ["hr_per_sd_upper", (r) => r.hrPerSdUpper], ["hr_per_sd_p", (r) => r.hrPerSdP],
-  ["mannwhitney_p", (r) => r.mannWhitneyP], ["rmst_diff", (r) => r.rmstDiff], ["rmst_p", (r) => r.rmstP], ["error", (r) => r.error],
+  ["mannwhitney_p", (r) => r.mannWhitneyP], ["rmst_diff", (r) => r.rmstDiff], ["rmst_p", (r) => r.rmstP], ["error", (r) => r.error], ["qc_excluded", (r) => (r.qcExcluded ? 1 : 0)],
 ];
 
 export function r1ResultsCsv(rows: FeatureResult[]): string {

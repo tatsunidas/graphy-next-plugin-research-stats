@@ -99,14 +99,19 @@ export interface FeatureResult {
   mannWhitneyP: number | null;
   rmstDiff: number | null;
   rmstP: number | null;
+  /** 群の HR が出せないときの理由（群に死亡が無く発散する、など）。log-rank の p・q は有効で、選択の対象に残る。 */
+  hrGroupNote: string | null;
   /** 計算できなかった理由。p などは null のまま（0 や 1 にしない）。 */
   error: string | null;
+  /** error が、指定の層に分けられない・人数不足などの QC による除外なら true（計算の失敗とは分けて数える）。 */
+  qcExcluded: boolean;
 }
 
 const emptyResult = (feature: string): FeatureResult => ({
   feature, n: 0, events: 0, cuts: [], groupSizes: [], groupEvents: [], medians: [], logrankChi2: null, logrankP: null,
   rawOptimalP: null, correctedP: null, pUsed: null, q: null, hrGroup: null, hrGroupLower: null, hrGroupUpper: null, hrGroupP: null,
-  hrPerSd: null, hrPerSdLower: null, hrPerSdUpper: null, hrPerSdP: null, mannWhitneyP: null, rmstDiff: null, rmstP: null, error: null,
+  hrPerSd: null, hrPerSdLower: null, hrPerSdUpper: null, hrPerSdP: null, mannWhitneyP: null, rmstDiff: null, rmstP: null,
+  hrGroupNote: null, error: null, qcExcluded: false,
 });
 
 export interface SurvivalCohort {
@@ -166,8 +171,8 @@ export async function analyzeFeature(
   const s = subSurv(cohort, ix);
   r.n = ix.length;
   r.events = s.event.reduce((a, b) => a + b, 0);
-  if (r.n < 6 || r.events < 2) { r.error = `欠損を除くと患者 ${r.n} 人・イベント ${r.events} 件で、解析できません`; return r; }
-  if (new Set(x).size < 2) { r.error = "値がすべて同じです"; return r; }
+  if (r.n < 6 || r.events < 2) { r.error = `欠損を除くと患者 ${r.n} 人・イベント ${r.events} 件で、解析できません`; r.qcExcluded = true; return r; }
+  if (new Set(x).size < 2) { r.error = "値がすべて同じです"; r.qcExcluded = true; return r; }
 
   let g: Grouping | { error: string };
   if (p.groupMode === "optimal") {
@@ -178,14 +183,14 @@ export async function analyzeFeature(
       await tick(label, run.progress);
     }
     const res = run.result();
-    if ("error" in res) { r.error = res.error; return r; }
+    if ("error" in res) { r.error = res.error; r.qcExcluded = true; return r; }
     r.rawOptimalP = res.rawP;
     r.correctedP = res.correctedP;
     g = groupByCuts(x, [res.observed.cut]);
   } else if (p.groupMode === "median") g = groupByCuts(x, [quantile7([...x].sort((a, b) => a - b), 0.5)]);
   else if (p.groupMode === "value") g = groupByCuts(x, [p.groupValue as number]);
   else { const sx = [...x].sort((a, b) => a - b); g = groupByCuts(x, [quantile7(sx, 1 / 3), quantile7(sx, 2 / 3)]); }
-  if ("error" in g) { r.error = g.error; return r; }
+  if ("error" in g) { r.error = `層に分けられません: ${g.error}`; r.qcExcluded = true; return r; }
   r.cuts = g.cuts;
   for (let k = 0; k < g.k; k++) {
     const members = g.group.map((v, i) => (v === k ? i : -1)).filter((i) => i >= 0);
@@ -200,8 +205,11 @@ export async function analyzeFeature(
   r.pUsed = p.groupMode === "optimal" ? r.correctedP : r.logrankP;
 
   const hg = groupHr(s, g);
-  if ("error" in hg) r.error = r.error ?? `群の HR: ${hg.error}`;
-  else { r.hrGroup = hg.hr; r.hrGroupLower = hg.lo; r.hrGroupUpper = hg.hi; r.hrGroupP = hg.p; }
+  if ("error" in hg) {
+    // 群に死亡が無いと HR は発散する（完全分離）。log-rank の p・q は有効なので、特徴量は落とさず理由だけ記録する
+    const noEvent = r.groupEvents.map((e, k) => (e === 0 ? k + 1 : -1)).filter((k) => k > 0);
+    r.hrGroupNote = noEvent.length ? `推定不能（群 ${noEvent.join("・")} に死亡なし）` : `推定不能（${hg.error}）`;
+  } else { r.hrGroup = hg.hr; r.hrGroupLower = hg.lo; r.hrGroupUpper = hg.hi; r.hrGroupP = hg.p; }
 
   const m = x.reduce((a, b) => a + b, 0) / x.length, sdx = sd(x);
   const cf = coxFit(s, x.map((v) => [(v - m) / sdx]));
@@ -245,8 +253,22 @@ export function covariatesOf(d: Dataset, cohort: SurvivalCohort): CovariateData 
   return { names: cols.map((c) => c.name), values: cols.map((c) => cohort.patients.map((i) => (typeof c.values[i] === "number" ? (c.values[i] as number) : null))) };
 }
 
+/**
+ * 多変量 Cox に入れる変数（特徴量＋共変量）の数の上限は、イベント数 ÷ 10（変数 1 個あたりイベント 10 件。
+ * Peduzzi P et al. J Clin Epidemiol 1996;49:1373）。これを超えると係数が発散し、情報行列が特異になりやすい。
+ */
+export const EVENTS_PER_VARIABLE = 10;
+export const maxModelVariables = (events: number): number => Math.floor(events / EVENTS_PER_VARIABLE);
+
 export interface MultivariateResult {
+  /** 多変量に入れた特徴量（基準を満たしたもののうち、上限の範囲で p の小さい順）。 */
   selected: string[];
+  /** 基準（q または p）を満たした特徴量。 */
+  screened: string[];
+  /** 基準を満たしたが、変数の上限のため多変量に入れなかった特徴量。 */
+  notEntered: string[];
+  /** 変数の上限（イベント数 ÷ 10。モデルを作ったときだけ）。 */
+  maxVars: number | null;
   covariates: string[];
   nUsed: number;
   eventsUsed: number;
@@ -267,7 +289,9 @@ export interface MultivariateResult {
 function screenSync(names: string[], values: number[][], ix: number[], s: Surv, p: R1Params): number[] {
   const rows = names.map((nm, j) => analyzeFeatureFast(nm, ix.map((i) => values[j][i]), s, p));
   applyMultiplicity(rows, p.multiplicity);
-  return rows.map((r, j) => (isSelected(r, p) ? j : -1)).filter((j) => j >= 0);
+  // p の小さい順（多変量の本体と同じ並び。変数の上限で上から切るため）
+  return rows.map((r, j) => (isSelected(r, p) ? j : -1)).filter((j) => j >= 0)
+    .sort((a, b) => (rows[a].pUsed as number) - (rows[b].pUsed as number) || a - b);
 }
 
 /** screen 用の軽い版: 群分けと log-rank だけ（Cox・RMST・並べ替えをしない）。 */
@@ -306,19 +330,37 @@ export async function multivariate(
   ctx: FeatureContext, rows: FeatureResult[], cov: CovariateData, p: R1Params, rng: Rng,
   tick: (label: string, fraction: number) => Promise<void>,
 ): Promise<MultivariateResult> {
-  const out: MultivariateResult = { selected: [], covariates: cov.names, nUsed: 0, eventsUsed: 0, fit: null, terms: [], addedValue: null, cIndexApparent: null, corrected: null, notes: [], error: null };
-  const selIdx = rows.map((r, j) => (isSelected(r, p) ? j : -1)).filter((j) => j >= 0);
-  out.selected = selIdx.map((j) => rows[j].feature);
-  if (!selIdx.length) { out.notes.push("基準を満たす特徴量が無いため、多変量モデルは作りません"); return out; }
+  const out: MultivariateResult = { selected: [], screened: [], notEntered: [], maxVars: null, covariates: cov.names, nUsed: 0, eventsUsed: 0, fit: null, terms: [], addedValue: null, cIndexApparent: null, corrected: null, notes: [], error: null };
+  const screenedIdx = rows.map((r, j) => (isSelected(r, p) ? j : -1)).filter((j) => j >= 0)
+    .sort((a, b) => (rows[a].pUsed as number) - (rows[b].pUsed as number) || a - b);
+  out.screened = screenedIdx.map((j) => rows[j].feature);
+  if (!screenedIdx.length) { out.notes.push("基準を満たす特徴量が無いため、多変量モデルは作りません"); return out; }
   const n = ctx.surv.time.length;
+  const nCov = cov.names.length;
+  const completeOf = (fi: number[]) => Array.from({ length: n }, (_, i) => i).filter((i) => fi.every((j) => ctx.values[j][i] !== null) && cov.values.every((c) => c[i] !== null));
+  const eventsOf = (idx: number[]) => idx.reduce((a, i) => a + ctx.surv.event[i], 0);
+  // 入れる数 k: 入れた特徴量が揃った患者のイベント数 E で、k + 共変量 ≤ E ÷ 10 を満たす最大の k（p の小さい順）
+  let k = screenedIdx.length;
+  for (; k > 0; k--) {
+    const fi = screenedIdx.slice(0, k).map((j) => ctx.names.indexOf(rows[j].feature));
+    if (k + nCov <= maxModelVariables(eventsOf(completeOf(fi)))) break;
+  }
+  const selIdx = screenedIdx.slice(0, k);
+  out.selected = selIdx.map((j) => rows[j].feature);
+  out.notEntered = screenedIdx.slice(k).map((j) => rows[j].feature);
   const featIdx = selIdx.map((j) => ctx.names.indexOf(rows[j].feature));
-  const complete = Array.from({ length: n }, (_, i) => i).filter((i) => featIdx.every((j) => ctx.values[j][i] !== null) && cov.values.every((c) => c[i] !== null));
+  const complete = completeOf(featIdx);
   const s = subSurv(ctx.surv, complete);
   out.nUsed = complete.length;
   out.eventsUsed = s.event.reduce((a, b) => a + b, 0);
+  out.maxVars = maxModelVariables(out.eventsUsed);
+  if (out.notEntered.length) {
+    out.notes.push(k === 0
+      ? `イベント ${out.eventsUsed} 件に対し、変数 1 個あたり ${EVENTS_PER_VARIABLE} 件（EPV ${EVENTS_PER_VARIABLE}）を保つと、モデルに入れる変数は ${out.maxVars} 個までで、共変量 ${nCov} 個を除くと特徴量を入れる枠がないため、特徴量を入れた多変量モデルは作りません。基準を満たした ${screenedIdx.length} 個の結果は、特徴量ごとの表にあります`
+      : `イベント ${out.eventsUsed} 件に対し、変数 1 個あたり ${EVENTS_PER_VARIABLE} 件（EPV ${EVENTS_PER_VARIABLE}）を保つため、モデルに入れる変数は ${out.maxVars} 個までです（共変量 ${nCov} 個を含む）。基準を満たした ${screenedIdx.length} 個のうち、p の小さい順に ${k} 個を入れ、${out.notEntered.length} 個は入れませんでした: ${out.notEntered.join(", ")}`);
+  }
+  if (k === 0) return out;
   if (complete.length < n) out.notes.push(`欠損のある患者 ${n - complete.length} 人を多変量モデルから除きました（完全症例のみ）`);
-  const nVars = selIdx.length + cov.names.length;
-  if (out.eventsUsed < 10 * nVars) out.notes.push(`イベント ${out.eventsUsed} 件に対して変数が ${nVars} 個あります（1 変数あたり 10 件未満）。係数は不安定です`);
   const zs = featIdx.map((j) => zScores(complete.map((i) => ctx.values[j][i] as number)));
   const X = complete.map((_, r) => [...zs.map((z) => z.z[r]), ...cov.values.map((c) => c[complete[r]] as number)]);
   const fit = coxFit(s, X);
@@ -370,7 +412,9 @@ async function bootstrapPart(
 function makeFit(names: string[], vals: number[][], covs: number[][], s: Surv, p: R1Params): FitFn {
   return (idx) => {
     const sub = subSurv(s, idx);
-    const sel = screenSync(names, vals, idx, sub, p);
+    // 本体と同じ手順: 基準を満たしたものを p の小さい順に、標本のイベント数から決まる上限（EPV）まで入れる
+    const cap = Math.max(0, maxModelVariables(sub.event.reduce((a, b) => a + b, 0)) - covs.length);
+    const sel = screenSync(names, vals, idx, sub, p).slice(0, cap);
     const z = sel.map((j) => {
       const col = idx.map((i) => vals[j][i]);
       const m = col.reduce((a, b) => a + b, 0) / col.length, sdv = sd(col);

@@ -206,6 +206,7 @@
      "summary": {
       "features": 4,
       "comparisons": 4,
+      "excluded": 0,
       "failed": 0,
       "selected": 1
      },
@@ -216,7 +217,10 @@
      "id": "multivariate",
      "status": "ok",
      "summary": {
+      "screened": 1,
       "selected": 1,
+      "notEntered": 0,
+      "maxVars": 5,
       "nUsed": 70,
       "eventsUsed": 57,
       "cIndexApparent": 0.6793269230769231,
@@ -377,7 +381,8 @@
       "apparentAuc": 0.8811369509043928,
       "looAuc": 0.8578811369509044,
       "looCohort": 70,
-      "looFailed": 0
+      "looFailed": 0,
+      "looEmptySelection": 0
      },
      "warnings": [
       "LOO の予測は互いに独立でないため、LOO の AUC の信頼区間は目安です"
