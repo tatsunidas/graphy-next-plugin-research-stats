@@ -21,8 +21,8 @@ import { assumptionReport } from "./stats/assumptionReport";
 import { pairedDrop, pairedFromDelta, PRE_ASSUMP_DEFAULTS, PRE_PAIRED_DEFAULTS, PRE_UNPAIRED_DEFAULTS, readPre, type PairedInfo, type PairedMatrix, type PreSpec } from "./pipeline/pre";
 import type { DeltaResult } from "./delta";
 import type { AssumptionRow } from "./stats/assumptionReport";
-import { finalModel, gridOf, hyperText, nestedCv, validateMl, validateSpec, type FinalModel, type MlSpec, type NestedCvResult, type NestedCvSpec, type Task } from "./pipeline/nestedCv";
-import { stratifiedHoldout } from "./pipeline/split";
+import { finalModel, gridOf, hyperText, meanByGroup, nestedCv, unitsOf, validateMl, validateSpec, type FinalModel, type MlSpec, type NestedCvResult, type NestedCvSpec, type Task } from "./pipeline/nestedCv";
+import { groupIndex, holdoutFor } from "./pipeline/split";
 import { addEvaluation, checkLock, fingerprint, parseLock, sealLock, canonicalJson, LOCK_FORMAT, LOCK_VERSION, type LockFile } from "./pipeline/lockFile";
 import { sha256Hex } from "./digest";
 
@@ -200,7 +200,10 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
 }
 
 export interface P4Cohort {
+  /** 行の ID（平均のときは患者 ID）。 */
   ids: string[];
+  /** 行のままのとき、行ごとの患者 ID（分割・評価・固定ファイルの単位）。平均のときは null。 */
+  groups: string[] | null;
   /** 結果（二値はラベルの文字列、生存は [時間, イベント]）。指紋に使う。 */
   outcome: unknown[];
   task: Task;
@@ -226,7 +229,12 @@ export async function buildCohort(d: Dataset, p: P4Params, delta: DeltaResult | 
     if (pm && "error" in pm) return pm;
     const ids = c.patients.map((i) => d.ids[i]);
     const outcome = c.y.map((v) => c.labels[v]);
-    return { ids, outcome, task: { kind: "binary", y: c.y }, names: d.featureNames, X: c.patients.map((i) => d.features[i]), labels: c.labels, fingerprint: await fingerprint(ids, outcome), paired: pm };
+    const groups = d.groups ? c.patients.map((i) => (d.groups as string[])[i]) : null;
+    if (groups) {
+      const g = groupIndex(groups), pos = g.first.reduce((a, i) => a + c.y[i], 0);
+      if (pos < 5 || g.ids.length - pos < 5) return { error: `各群 5 人以上が要ります（患者単位で、陽性 ${pos} 人・陰性 ${g.ids.length - pos} 人。行は ${ids.length} 行）` };
+    }
+    return { ids, groups, outcome, task: { kind: "binary", y: c.y }, names: d.featureNames, X: c.patients.map((i) => d.features[i]), labels: c.labels, fingerprint: await fingerprintOf(ids, groups, outcome), paired: pm };
   }
   const c = survivalCohort(d);
   if ("error" in c) return c;
@@ -234,8 +242,24 @@ export async function buildCohort(d: Dataset, p: P4Params, delta: DeltaResult | 
   if (pm && "error" in pm) return pm;
   const ids = c.patients.map((i) => d.ids[i]);
   const outcome = c.surv.time.map((t, q) => [t, c.surv.event[q]]);
-  return { ids, outcome, task: { kind: "survival", surv: c.surv }, names: d.featureNames, X: c.patients.map((i) => d.features[i]), labels: null, fingerprint: await fingerprint(ids, outcome), paired: pm };
+  const groups = d.groups ? c.patients.map((i) => (d.groups as string[])[i]) : null;
+  if (groups) {
+    const g = groupIndex(groups), ev = g.first.reduce((a, i) => a + c.surv.event[i], 0);
+    if (g.ids.length < 6) return { error: `時間とイベントが揃った患者が ${g.ids.length} 人しかいません（6 人以上要ります。行は ${ids.length} 行）` };
+    if (ev < 2) return { error: `イベントがある患者が ${ev} 人しかいません（2 人以上要ります）` };
+  }
+  return { ids, groups, outcome, task: { kind: "survival", surv: c.surv }, names: d.featureNames, X: c.patients.map((i) => d.features[i]), labels: null, fingerprint: await fingerprintOf(ids, groups, outcome), paired: pm };
 }
+
+/** 対象の指紋。行のままなら、患者（グループ）ごとの結果（患者の先頭の行）で作る（行の数・並びに依らない）。 */
+async function fingerprintOf(ids: string[], groups: string[] | null, outcome: unknown[]): Promise<string> {
+  if (!groups) return fingerprint(ids, outcome);
+  const g = groupIndex(groups);
+  return fingerprint(g.ids, g.first.map((i) => outcome[i]));
+}
+
+/** 患者単位に揃えた固定ファイルの ID（行のままなら患者 ID の一覧、そうでなければ ID）。 */
+export const unitIds = (c: P4Cohort): string[] => (c.groups ? groupIndex(c.groups).ids : c.ids);
 
 export const strataOf = (task: Task): number[] => (task.kind === "binary" ? task.y : task.surv.event);
 
@@ -257,23 +281,24 @@ export async function splitCohort(c: P4Cohort, p: P4Params, rng: Rng, lockText: 
   if (p.lockMode === "none") return { lock: null, lockIsNew: false, dev: all, test: [] };
   if (p.lockMode === "create") {
     const strat = p.outcomeKind === "binary" || p.stratifySurvival ? strataOf(c.task) : null;
-    const isTest = stratifiedHoldout(c.ids.length, strat, p.testFraction as number, new Rng(splitSeed));
+    const isTest = holdoutFor(c.ids.length, strat, p.testFraction as number, new Rng(splitSeed), c.groups);
     const test = all.filter((i) => isTest[i]), dev = all.filter((i) => !isTest[i]);
     if (!test.length || !dev.length) return { error: "テスト集合か開発集合が空になります。割合を変えてください" };
     const lock = await sealLock({
       format: LOCK_FORMAT, version: LOCK_VERSION, createdAt: now, pluginVersion, outcomeKind: p.outcomeKind, seed: splitSeed,
       testFraction: p.testFraction as number, stratifiedBy: strat ? (p.outcomeKind === "binary" ? "outcome" : "event") : null,
-      cohortFingerprint: c.fingerprint, cohortSize: c.ids.length, testIds: test.map((i) => c.ids[i]).sort(), evaluations: [],
+      ...(c.groups ? { unit: "patient-grouped-rows" as const } : {}),
+      cohortFingerprint: c.fingerprint, cohortSize: unitIds(c).length, testIds: [...new Set(test.map((i) => (c.groups ?? c.ids)[i]))].sort(), evaluations: [],
     });
     return { lock, lockIsNew: true, dev, test };
   }
   if (lockText === null) return { error: "テスト集合の固定ファイルを読み込んでください" };
   const lock = await parseLock(lockText);
   if ("error" in lock) return lock;
-  const bad = checkLock(lock, p.outcomeKind, c.fingerprint, c.ids);
+  const bad = checkLock(lock, p.outcomeKind, c.fingerprint, unitIds(c));
   if (bad) return { error: bad };
-  const ts = new Set(lock.testIds);
-  return { lock, lockIsNew: false, dev: all.filter((i) => !ts.has(c.ids[i])), test: all.filter((i) => ts.has(c.ids[i])) };
+  const ts = new Set(lock.testIds), unit = c.groups ?? c.ids;
+  return { lock, lockIsNew: false, dev: all.filter((i) => !ts.has(unit[i])), test: all.filter((i) => ts.has(unit[i])) };
 }
 
 /** R3 の除外候補 CSV などから、"feature" 列の名前を読む。 */
@@ -341,14 +366,16 @@ export function specOf(c: P4Cohort, dev: number[], p: P4Params, impute: boolean)
   return {
     outerK: p.outerK, innerK: p.innerK, repeats: p.repeats, kCandidates: p.kCandidates, strata: strat ? dev.map((i) => strat[i]) : null, impute,
     model: p.ml ?? (p.model === "lasso" ? { kind: "lasso", nLambda: p.lassoNLambda, rule: p.lassoRule as LambdaRule } : { kind: "topk" }),
+    ...(c.groups ? { groups: c.groups } : {}),
   };
 }
 
 /** 品質管理で残した列だけの行列。 */
 export const subMatrix = (X: (number | null)[][], keep: number[]) => X.map((r) => keep.map((j) => r[j]));
 
-export function checkSpec(spec: NestedCvSpec, nDev: number): string | null {
-  return validateSpec(spec, nDev);
+/** dev は開発集合の行。分割の単位（患者単位なら患者数）で検査する。 */
+export function checkSpec(spec: NestedCvSpec, dev: readonly number[]): string | null {
+  return validateSpec(spec, unitsOf(spec, dev), dev.length);
 }
 
 export { nestedCv, finalModel };
@@ -385,8 +412,14 @@ const percentile = (s: number[], q: number) => {
 export async function evaluateTest(c: P4Cohort, test: number[], fm: FinalModel, lock: LockFile, p: P4Params, rng: Rng, featFp: string, now: string): Promise<TestResult | { error: string }> {
   if (!fm.model) return { error: fm.error ?? "最終モデルがありません" };
   const pred = test.map((i) => fm.model!.predict(i));
-  const ok = test.map((i, q) => ({ i, v: pred[q] })).filter((x): x is { i: number; v: number } => x.v !== null);
-  const excluded = test.filter((_, q) => pred[q] === null).map((i) => c.ids[i]);
+  let ok = test.map((i, q) => ({ i, v: pred[q], g: c.groups ? c.groups[i] : "" })).filter((x): x is { i: number; v: number; g: string } => x.v !== null);
+  let excluded = test.filter((_, q) => pred[q] === null).map((i) => c.ids[i]);
+  if (c.groups) {
+    // 1 患者 = 1 点: 行ごとの予測を患者ごとに平均する。除くのは、全部の行で予測できなかった患者
+    ok = meanByGroup(ok);
+    const kept = new Set(ok.map((x) => x.g));
+    excluded = [...new Set(test.filter((_, q) => pred[q] === null).map((i) => (c.groups as string[])[i]))].filter((g) => !kept.has(g));
+  }
   let value: number | null = null, lower: number | null = null, upper: number | null = null, roc: RocPoint[] = [], cal: CalibrationBin[] = [], bf = 0;
   if (c.task.kind === "binary") {
     const y = c.task.y;

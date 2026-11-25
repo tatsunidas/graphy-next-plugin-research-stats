@@ -62,5 +62,7 @@ export interface Skill {
   /** 出典（論文など）。空なら「出典なし」と表示する（この段の基盤スキルは統計の手法を持たない）。 */
   sources: string[];
   defaults: Record<string, ParamValue>;
+  /** 既定値を持たない任意の設定（渡したときだけ記録に載る）。既定の実行の記録を変えないために defaults へ入れない。 */
+  optional?: string[];
   steps: Step[];
 }

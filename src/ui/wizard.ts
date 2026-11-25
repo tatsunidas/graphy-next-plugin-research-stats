@@ -262,6 +262,14 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     s.params = { ...s.params, rowFilter, excludeFeatureColumns: [...s.excluded] };
   }
 
+  /** 行の扱い（"asis" だけ設定に載せる。平均は設定に何も書かない）。 */
+  function setRowsMode(mode: "average" | "asis") {
+    const { rowsMode: _drop, ...rest } = s.params;
+    s.params = mode === "asis" ? { ...rest, rowsMode: "asis" } : rest;
+    s.result = null;
+    void recomputeCheck();
+  }
+
   function excludeColumn(name: string, on: boolean) {
     s.excluded = on ? [...new Set([...s.excluded, name])] : s.excluded.filter((c) => c !== name);
     syncSelection();
@@ -297,6 +305,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     s.check = { ...IDLE, status: "running" };
     const params: Record<string, ParamValue> = {};
     for (const k of Object.keys(DATASET_CHECK.defaults)) params[k] = p[k];
+    if (p.rowsMode === "asis") params.rowsMode = "asis";
     Object.assign(params, { timeColumn: null, eventColumn: null, outcomeColumn: null, covariates: [] });
     const { record, state } = await runSkill(
       DATASET_CHECK,
@@ -387,6 +396,20 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       h("button", { type: "button", "data-testid": "rs-check-save-record", onclick: () => download(`${JSON.stringify(record, null, 2)}\n`, "research-stats-record.json", "application/json") }, t("saveRecord")));
   }
 
+  /** 同じ患者に複数行が残るときの「行の扱い」。「行のまま」は P4 を選んだときだけ有効で、ほかは理由を出す。 */
+  function rowsModeBlock(): HTMLElement {
+    const id = s.skill?.id ?? null;
+    const asisOk = id === P4_PIPELINE.id;
+    const why = id === null ? t("rowsModeNeedP4") : id === R1_PROGNOSIS.id ? t("rowsModeNoR1") : id === R2_DISCRIMINATION.id ? t("rowsModeNoR2") : id === R5_MODEL.id ? t("rowsModeNoR5") : null;
+    const sel = h("select", { "data-testid": "rs-rows-mode", onchange: (e: Event) => { setRowsMode((e.target as HTMLSelectElement).value === "asis" ? "asis" : "average"); render(); } },
+      h("option", { value: "average" }, t("rowsModeAverage")), h("option", { value: "asis", disabled: !asisOk }, t("rowsModeAsis")));
+    sel.value = s.params.rowsMode === "asis" ? "asis" : "average";
+    return h("div", { "data-testid": "rs-rows-mode-block" },
+      h("div", { class: "rs-row" }, h("label", {}, t("rowsModeTitle")), sel),
+      h("div", { class: "rs-note" }, t("rowsModeHelp")),
+      !asisOk && why ? h("div", { class: "rs-note", "data-testid": "rs-rows-mode-reason" }, why) : null);
+  }
+
   /** 解析に使う単位: 列ごとの実際の値のチェック一覧（件数つき）。 */
   function unitBlock(): HTMLElement | null {
     const units = unitColumns();
@@ -440,12 +463,12 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     const p = sanitizeRoles(rolesForSkill(s.skill.id, s.params), s.params);
     const roles = { time: p.timeColumn as string | null, event: p.eventColumn as string | null, outcome: p.outcomeColumn as string | null };
     if (!roles.time && !roles.event && !roles.outcome) return [];
-    const key = JSON.stringify([roles, s.params.featureIdColumn, s.params.patientColumn, s.params.clinicalIdColumn, s.params.rowFilter, s.excluded, s.features.map((f) => f.sha256 ?? f.name), s.clinical.sha256 ?? s.clinical.name]);
+    const key = JSON.stringify([roles, s.params.rowsMode, s.params.featureIdColumn, s.params.patientColumn, s.params.clinicalIdColumn, s.params.rowFilter, s.excluded, s.features.map((f) => f.sha256 ?? f.name), s.clinical.sha256 ?? s.clinical.name]);
     if (key === targetKey) return targetCache;
     const r = buildDataset({
       features: s.features, featureIdColumn: s.params.featureIdColumn as string, patientColumn: s.params.patientColumn as string | null, featureColumns: null,
       excludeColumns: s.excluded, rowFilter: s.params.rowFilter as RowFilter[], clinical: s.clinical, clinicalIdColumn: s.params.clinicalIdColumn as string,
-      roles: { ...roles, covariates: [] },
+      roles: { ...roles, covariates: [] }, rowsMode: s.params.rowsMode === "asis" ? "asis" : "average",
     });
     targetKey = key;
     targetCache = r.ok ? targetLeaks(r.dataset) : [];
@@ -504,7 +527,9 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
           h("div", { "data-testid": "rs-counts" }, t("counts", { rows: rep.featureRows, pf: rep.patientsInFeatures, pc: rep.patientsInClinical, fo: rep.featureOnly.length, co: rep.clinicalOnly.length })),
           rep.lesionsPerPatient ? h("div", { class: "rs-note" }, t("lesions", rep.lesionsPerPatient)) : null,
           rep.filteredRows > 0 ? h("div", { class: "rs-note", "data-testid": "rs-filtered" }, t("unitFiltered", { n: rep.filteredRows })) : null,
-          rep.averagedRows > 0 && unitColumns().length ? h("div", { class: "rs-warn", "data-testid": "rs-note-averaged" }, t("unitAveraged", { n: rep.averagedRows, p: rep.averagedPatients })) : null,
+          rep.rowsAsIs ? h("div", { class: "rs-warn", "data-testid": "rs-note-rows-asis" }, t("rowsAsisNote", { rows: rep.rowsAsIs.rows, p: rep.rowsAsIs.patients, min: rep.lesionsPerPatient?.min ?? 1, max: rep.lesionsPerPatient?.max ?? 1 })) : null,
+          !rep.rowsAsIs && rep.averagedRows > 0 && unitColumns().length ? h("div", { class: "rs-warn", "data-testid": "rs-note-averaged" }, t("unitAveraged", { n: rep.averagedRows, p: rep.averagedPatients })) : null,
+          rep.averagedRows > 0 ? rowsModeBlock() : null,
           idList(t("featureOnly"), rep.featureOnly, "rs-feature-only"),
           idList(t("clinicalOnly"), rep.clinicalOnly, "rs-clinical-only"),
           rep.missing.length
@@ -529,7 +554,10 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       s.skill = SKILLS.find((r) => r.id === id) ?? null;
       s.result = null;
       s.selectedFeature = null;
-      if (wasR3 !== isR3()) void recomputeCheck();
+      // 「行のまま」は P4 だけ。ほかの解析に切り替えたら平均に戻す
+      const dropAsis = s.params.rowsMode === "asis" && s.skill?.id !== P4_PIPELINE.id;
+      if (dropAsis) setRowsMode("average");
+      if (wasR3 !== isR3() && !dropAsis) void recomputeCheck();
       render();
     };
     const row = h("div", { class: "rs-row" }, h("label", {}, t("skill")), sel);
@@ -561,7 +589,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     const p = s.params;
     const hasPair = s.baseline.length > 0 && s.followup.length > 0;
     const binary = id === R2_DISCRIMINATION.id || (id === P4_PIPELINE.id && p.outcomeKind === "binary");
-    const rows: (HTMLElement | null)[] = [h("div", { class: "rs-note" }, t("preIntro"))];
+    const rows: (HTMLElement | null)[] = [h("div", { class: "rs-note" }, t("preIntro")), s.params.rowsMode === "asis" ? h("div", { class: "rs-warn", "data-testid": "rs-pre-rows-asis" }, t("rowsAsisPre")) : null];
     const ab = (on: string, a: string, th: string | null, keys: [string, string, string], labels: [Key, Key, Key], tip: Key) => {
       const out: (HTMLElement | null)[] = [checkRow(on, t(labels[0]), keys[0], tip)];
       if (p[keys[0]] === true) {
@@ -895,7 +923,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     const isP4 = skill.id === P4_PIPELINE.id;
     if ((!noClinical && !s.clinical) || !s.features.length || s.progress !== null) return;
     const params: Record<string, ParamValue> = sanitizeRoles(rolesForSkill(skill.id, s.params), s.params);
-    for (const k of Object.keys(params)) if (!(k in skill.defaults)) delete params[k];
+    for (const k of Object.keys(params)) if (!(k in skill.defaults) && !skill.optional?.includes(k)) delete params[k];
     if (isP4) params.evaluateTest = evaluate;
     // 前と後の表が無いなら、対応ありの除外は使えない（画面にも出していない）
     if (!(s.baseline.length && s.followup.length) && "prePairedOn" in params) params.prePairedOn = false;

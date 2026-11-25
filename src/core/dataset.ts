@@ -44,12 +44,21 @@ export interface DatasetSpec {
   clinical: TableSource;
   clinicalIdColumn: string;
   roles: Roles;
+  /**
+   * 同じ患者に複数行があるときの扱い。"average"（既定）は欠損を除く平均で患者ごとに 1 行にまとめる。
+   * "asis" は 1 行 = 1 観測のまま、患者を {@link Dataset.groups} に持つ（臨床の値は患者の値を各行に複製する）。
+   * 患者の列（patientColumn）が無ければ 1 行 = 1 患者なので違いは無い。
+   */
+  rowsMode?: "average" | "asis";
 }
 
 export type ClinicalValue = number | string | null;
 
 export interface Dataset {
+  /** 平均のとき患者 ID。行のまま（groups あり）のとき行の ID。 */
   ids: string[];
+  /** 行のままのとき、行ごとの患者 ID（分割・評価の単位）。平均のときは無い。 */
+  groups?: string[];
   featureNames: string[];
   /** [患者][特徴量]。欠損は null。 */
   features: (number | null)[][];
@@ -76,6 +85,8 @@ export interface JoinReport {
   joined: number;
   featureOnly: string[];
   clinicalOnly: string[];
+  /** 行のままのときだけ: 使った行数と患者数（joined は患者数）。 */
+  rowsAsIs?: { rows: number; patients: number };
   lesionsPerPatient: { min: number; max: number } | null;
   /** 欠損が 1 つ以上ある列だけ。 */
   missing: { name: string; count: number; of: number }[];
@@ -303,17 +314,23 @@ export function buildDataset(spec: DatasetSpec): BuildResult {
   });
   if (errors.length) return { ok: false, errors };
 
-  const features = joinedIds.map((id) => columns.map((_, m) => meanOrNull(byPatient.get(id)!.map((r) => r.values[m]))));
-  const lesionCounts = joinedIds.map((id) => byPatient.get(id)!.length);
+  const asis = spec.rowsMode === "asis" && !!spec.patientColumn;
+  const patientIndex = new Map(joinedIds.map((id, i) => [id, i]));
+  const keptRows = asis ? rows.filter((r) => patientIndex.has(r.patient)) : [];
+  const features = asis ? keptRows.map((r) => [...r.values]) : joinedIds.map((id) => columns.map((_, m) => meanOrNull(byPatient.get(id)!.map((r) => r.values[m]))));
+  const patientCounts = joinedIds.map((id) => byPatient.get(id)!.length);
+  const lesionCounts = asis ? keptRows.map((r) => patientCounts[patientIndex.get(r.patient)!]) : patientCounts;
+  const outClinical = asis ? clinical.map((c) => ({ ...c, values: keptRows.map((r) => c.values[patientIndex.get(r.patient)!]) })) : clinical;
+  const nOut = features.length;
 
   const missing: JoinReport["missing"] = [];
   columns.forEach((name, m) => {
     const count = features.filter((r) => r[m] === null).length;
-    if (count > 0) missing.push({ name, count, of: joinedIds.length });
+    if (count > 0) missing.push({ name, count, of: nOut });
   });
-  for (const c of clinical) {
+  for (const c of outClinical) {
     const count = c.values.filter((v) => v === null).length;
-    if (count > 0) missing.push({ name: c.name, count, of: joinedIds.length });
+    if (count > 0) missing.push({ name: c.name, count, of: nOut });
   }
   const tc = clinical.find((c) => c.role === "time");
   const ec = clinical.find((c) => c.role === "event");
@@ -325,11 +342,13 @@ export function buildDataset(spec: DatasetSpec): BuildResult {
   }
   if (joinedIds.length === 0) warnings.push("結合できた患者が 0 人です（ID の列の割り当てを確かめてください）");
 
-  const counts = lesionCounts;
+  const counts = patientCounts;
   const multi = featureIds.map((id) => byPatient.get(id)!.length).filter((n) => n > 1);
   return {
     ok: true,
-    dataset: { ids: joinedIds, featureNames: columns, features, lesionCounts, clinical },
+    dataset: asis
+      ? { ids: keptRows.map((r) => r.id), groups: keptRows.map((r) => r.patient), featureNames: columns, features, lesionCounts, clinical: outClinical }
+      : { ids: joinedIds, featureNames: columns, features, lesionCounts, clinical },
     report: {
       featureFiles: spec.features.length,
       featureRows: rows.length,
@@ -341,6 +360,7 @@ export function buildDataset(spec: DatasetSpec): BuildResult {
       joined: joinedIds.length,
       featureOnly,
       clinicalOnly,
+      ...(asis ? { rowsAsIs: { rows: nOut, patients: joinedIds.length } } : {}),
       lesionsPerPatient: counts.length ? { min: Math.min(...counts), max: Math.max(...counts) } : null,
       missing,
       survivalUsable,
