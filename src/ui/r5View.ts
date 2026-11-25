@@ -1,5 +1,6 @@
 import type { R5State } from "../core/skills";
 import { h } from "./dom";
+import { leakView } from "./p4View";
 import type { Key } from "./i18n";
 import { fmtP } from "./r1View";
 import { xyChart } from "./xyChart";
@@ -82,5 +83,6 @@ export function r5Panel(st: R5State, t: T): HTMLElement | null {
     h("h2", {}, t("skillR5")),
     h("div", { class: "rs-big", "data-testid": "rs-r5-sizes" }, t("r5Sizes", { n: st.cohort.patients.length, e: events, m: m.used.length })),
     h("h3", {}, t("r5Selected", { k: r.selected.length })),
-    model, cview, steps, screen, sch);
+    model, cview, steps, screen, sch,
+    st.split ? leakView(st.split, null, t, "rs-r5-leak") : h("div", { class: "rs-note", "data-testid": "rs-r5-leak-na" }, t("leakR5Na")));
 }

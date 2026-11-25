@@ -265,6 +265,8 @@ export interface QcStepResult {
   /** 欠損で外した開発集合の症例（complete のとき）。 */
   droppedDev: string[];
   dev: number[];
+  /** 品質管理が値を読んだ行（分散 0・相関）。 */
+  usedRows: number[];
   impute: boolean;
   missingCells: number;
 }
@@ -283,7 +285,7 @@ export function qcAndMissing(c: P4Cohort, dev: number[], test: number[], p: P4Pa
       droppedDev = dev.filter((i) => !devOut.includes(i)).map((i) => c.ids[i]);
     }
   }
-  return { keep: q.keep, removed: q.removed, unknownExcluded: q.unknownExcluded, droppedDev, dev: devOut, impute: p.missing === "impute", missingCells };
+  return { keep: q.keep, removed: q.removed, unknownExcluded: q.unknownExcluded, droppedDev, dev: devOut, usedRows: q.usedRows, impute: p.missing === "impute", missingCells };
 }
 
 export function specOf(c: P4Cohort, dev: number[], p: P4Params, impute: boolean): NestedCvSpec {

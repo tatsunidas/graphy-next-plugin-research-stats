@@ -163,3 +163,106 @@ describe("wizard: reproducibility needs no clinical table", () => {
   });
 });
 
+
+// 2D の単位を選んだ一括抽出の表: 症例（患者）ごとに WHOLE_3D・MAX_SECTION_2D・SLICE_2D の 3 行
+const UNITS3: [string, string, string][] = [["WHOLE_3D", "", ""], ["MAX_SECTION_2D", "ACQUISITION", "AXIAL"], ["SLICE_2D", "RESLICED", "SAGITTAL"]];
+const feature2dCsv = (extra: { head?: string[]; cells?: (i: number, k: number) => (string | number)[] } = {}) =>
+  ["CaseLabel,PatientID,SubjectCode,Unit,PlaneSource,Plane,RowKey,f1,f2" + (extra.head ? `,${extra.head.join(",")}` : ""),
+    ...ids.flatMap((id, i) => UNITS3.map(([u, ps, pl], k) =>
+      [`C${String(i + 1).padStart(3, "0")}`, id, `S${i}`, u, ps, pl, `C${i + 1}|${u}|${ps}|${pl}|${k}`, ((1 + ((i * 13 + k * 5) % 17)) / 3).toFixed(4), ((2 + ((i * 7 + k) % 11)) / 7).toFixed(4), ...(extra.cells?.(i, k) ?? [])].join(",")))].join("\n") + "\n";
+const check = (el: HTMLElement | null) => (el as HTMLInputElement).checked;
+async function toggle(testId: string, on: boolean) {
+  const el = q(testId) as HTMLInputElement;
+  el.checked = on;
+  el.dispatchEvent(new Event("change"));
+  await tick();
+}
+
+describe("wizard: 2D rows (unit of analysis)", () => {
+  it("default: WHOLE_3D only, a unique RowKey is the row ID, no duplicate-ID stop and nothing is averaged", async () => {
+    await pickFile("rs-file-features", "roi-features-batch.csv", feature2dCsv());
+    await pickFile("rs-file-clinical", "clin.csv", clinicalCsv("PatientID", ids));
+    await until(() => !!q("rs-check-pass"), "check pass");
+    expect(q("rs-units")).toBeTruthy();
+    expect(check(q("rs-unit-Unit-WHOLE_3D"))).toBe(true);
+    expect(check(q("rs-unit-Unit-MAX_SECTION_2D"))).toBe(false);
+    expect(check(q("rs-unit-Unit-SLICE_2D"))).toBe(false);
+    expect(q("rs-unit-Unit-WHOLE_3D")!.parentElement!.textContent).toContain(`(${N})`); // 件数
+    // Plane・PlaneSource は全部の値を選ぶ
+    expect(all("rs-unit-Plane").length).toBe(1);
+    expect(Array.from(q("rs-unit-Plane")!.querySelectorAll("input")).every((c) => (c as HTMLInputElement).checked)).toBe(true);
+    expect((q("rs-feature-id") as HTMLSelectElement).value).toBe("RowKey");
+    expect((q("rs-patient") as HTMLSelectElement).value).toBe("PatientID");
+    expect(q("rs-joined")!.textContent).toContain(`${N} 人`);
+    expect(q("rs-check-errors")).toBeNull();
+    expect(q("rs-filtered")!.textContent).toContain(String(2 * N));
+    expect(q("rs-note-averaged")).toBeNull();
+    expect((q("rs-skill") as HTMLSelectElement).disabled).toBe(false);
+  });
+
+  it("selecting more units warns that rows are averaged per patient; selecting none stops with an error", async () => {
+    await pickFile("rs-file-features", "roi-features-batch.csv", feature2dCsv());
+    await pickFile("rs-file-clinical", "clin.csv", clinicalCsv("PatientID", ids));
+    await until(() => !!q("rs-check-pass"), "check pass");
+    await toggle("rs-unit-Unit-MAX_SECTION_2D", true);
+    await until(() => !!q("rs-note-averaged"), "averaged note");
+    expect(q("rs-note-averaged")!.textContent).toContain(`${2 * N} 行を患者ごとに平均します`);
+    expect(q("rs-note-averaged")!.textContent).toContain("Unit・Plane が混ざった平均は解釈に注意");
+    expect(q("rs-check-pass")).not.toBeNull();
+    await toggle("rs-unit-Unit-MAX_SECTION_2D", false);
+    await toggle("rs-unit-Unit-WHOLE_3D", false);
+    await until(() => !!q("rs-check-errors"), "error");
+    expect(q("rs-check-errors")!.textContent).toContain("1 行も残りません");
+    expect(q("rs-check-pass")).toBeNull();
+    expect((q("rs-skill") as HTMLSelectElement).disabled).toBe(true);
+  });
+
+  it("a table without Unit/PlaneSource/Plane shows no unit section", async () => {
+    await pickFile("rs-file-features", "feat.csv", featureCsv("PatientID", ids));
+    await pickFile("rs-file-clinical", "clin.csv", clinicalCsv("PatientID", ids));
+    await until(() => !!q("rs-check-pass"), "check pass");
+    expect(q("rs-units")).toBeNull();
+    expect(q("rs-leak-cols")).toBeNull();
+    expect(q("rs-leak-target")).toBeNull();
+  });
+});
+
+describe("wizard: data leakage warnings", () => {
+  it("flags an ID-like column in use, lists the already-excluded ones separately, and excludes on request", async () => {
+    const feat = featureCsv("PatientID", ids).split("\n").filter(Boolean).map((line, r) => (r === 0 ? `${line},RowNo,Provenance_N` : `${line},${r},3`)).join("\n") + "\n";
+    await pickFile("rs-file-features", "feat.csv", feat);
+    await pickFile("rs-file-clinical", "clin.csv", clinicalCsv("PatientID", ids));
+    await until(() => !!q("rs-check-pass"), "check pass");
+    expect(q("rs-leak-cols-warn")!.textContent).toContain("RowNo");
+    expect(q("rs-leak-cols-warn")!.textContent).not.toContain("Provenance_N");
+    expect(q("rs-leak-auto")!.textContent).toContain("Provenance_N"); // 除外済み
+    expect(q("rs-leak-auto")!.textContent).not.toContain("RowNo");
+    const before = q("rs-feature-count")!.textContent!;
+    (q("rs-leak-exclude-RowNo") as HTMLButtonElement).click();
+    await until(() => !q("rs-leak-cols-warn"), "warning gone");
+    expect(q("rs-leak-user-excluded")!.textContent).toContain("RowNo");
+    expect(q("rs-feature-count")!.textContent).not.toBe(before);
+    // 戻すと、また警告になる
+    (q("rs-leak-restore-RowNo") as HTMLButtonElement).click();
+    await until(() => !!q("rs-leak-cols-warn"), "warning back");
+  });
+
+  it("warns when a feature completely separates the outcome (default role choice), and can exclude it", async () => {
+    const feat = featureCsv("PatientID", ids).split("\n").filter(Boolean).map((line, r) => {
+      if (r === 0) return `${line},sepf`;
+      const i = Math.floor((r - 1) / 2);
+      return `${line},${(i % 2 ? 10 : 1) + (i % 5) / 10}`; // Outcome: i % 2 ? resp : nonresp
+    }).join("\n") + "\n";
+    await pickFile("rs-file-features", "feat.csv", feat);
+    await pickFile("rs-file-clinical", "clin.csv", clinicalCsv("PatientID", ids));
+    await until(() => !!q("rs-check-pass"), "check pass");
+    await choose("rs-skill", "r2-discrimination"); // 目的変数は既定の推測のまま
+    expect((q("rs-outcome") as HTMLSelectElement).value).toBe("Outcome");
+    expect(q("rs-leak-target")!.textContent).toContain("sepf");
+    expect(q("rs-leak-target")!.textContent).toContain("結果を完全に分ける");
+    expect(q("rs-leak-target")!.textContent).not.toContain("f1 ↔");
+    (q("rs-leak-target-exclude-sepf") as HTMLButtonElement).click();
+    await until(() => !q("rs-leak-target"), "target warning gone");
+    await until(() => !!q("rs-check-pass"), "check pass again");
+  });
+});

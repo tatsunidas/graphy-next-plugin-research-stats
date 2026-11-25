@@ -17,8 +17,15 @@ import { coxFit } from "../survival/cox";
 import { cIndex } from "../survival/cindex";
 import { mannWhitney } from "../survival/mannwhitney";
 import type { Surv } from "../survival/types";
-import { fitStandardizer, imputeByTrain, standardizeRow, type Imputed } from "./preprocess";
+import { fitStandardizer, imputeByTrain as imputeRaw, standardizeRow, type Imputed } from "./preprocess";
+
+/** 補完（訓練の行の中央値）。推定に使った行を記録する。 */
+function imputeByTrain(X: (number | null)[][], train: number[], impute: boolean, trace?: RowTrace): Imputed {
+  trace?.note("impute", train);
+  return imputeRaw(X, train, impute);
+}
 import { stratifiedFolds } from "./split";
+import type { RowTrace } from "./rowTrace";
 import { lassoCv, type LambdaRule } from "../model/lasso";
 import { randomForest, sqrtMtry } from "../model/randomForest";
 import { gbm } from "../model/gbm";
@@ -76,6 +83,8 @@ export interface NestedCvSpec {
   impute: boolean;
   /** 省略時は上位 k 個。 */
   model?: ModelSpec;
+  /** 推定に使った行の記録（leak.ts の検査用）。 */
+  trace?: RowTrace;
 }
 
 /** **試験専用**の漏れ（画面からは選べない）。負例として、偏りが出ることを確かめるために使う。 */
@@ -127,7 +136,8 @@ export function rankFeatures(imp: Imputed, task: Task, rows: number[]): number[]
 }
 
 /** 上位 k 列で、訓練の行だけで標準化して当てはめる。 */
-export function fitTopK(imp: Imputed, task: Task, train: number[], ranking: number[], k: number): Trained | { error: string } {
+export function fitTopK(imp: Imputed, task: Task, train: number[], ranking: number[], k: number, trace?: RowTrace): Trained | { error: string } {
+  trace?.note("fit", train);
   const cols = ranking.slice(0, k);
   if (!cols.length) return { error: "選べる特徴量がありません" };
   const st = fitStandardizer(imp.X, train, cols);
@@ -166,7 +176,7 @@ export interface InnerChoice {
 }
 
 /** 訓練の行 T の中で、内側の交差検証（層化しない）により k を選ぶ。 */
-export function chooseK(X: (number | null)[][], task: Task, T: number[], spec: NestedCvSpec, rng: Rng, fixedRanking: number[] | null): InnerChoice {
+export function chooseK(X: (number | null)[][], task: Task, T: number[], spec: NestedCvSpec, rng: Rng, fixedRanking: number[] | null, fixedRows: number[] | null = null): InnerChoice {
   const folds = stratifiedFolds(T.length, null, spec.innerK, rng);
   const K = spec.kCandidates;
   const pooled: (number | null)[][] = K.map(() => new Array<number | null>(T.length).fill(null));
@@ -174,14 +184,17 @@ export function chooseK(X: (number | null)[][], task: Task, T: number[], spec: N
   for (let f = 0; f < spec.innerK; f++) {
     const tin = T.filter((_, p) => folds[p] !== f), pos = T.map((_, p) => p).filter((p) => folds[p] === f);
     const tout = pos.map((p) => T[p]);
-    const imp = imputeByTrain(X, tin, spec.impute);
+    spec.trace?.enter(f, tin);
+    const imp = imputeByTrain(X, tin, spec.impute, spec.trace);
+    spec.trace?.note("rank", fixedRanking ? (fixedRows as number[]) : tin);
     const ranking = fixedRanking ?? rankFeatures(imp, task, tin);
     K.forEach((k, a) => {
-      const m = fitTopK(imp, task, tin, ranking, k);
+      const m = fitTopK(imp, task, tin, ranking, k, spec.trace);
       const pr = tout.map((i) => ("error" in m ? null : m.predict(i)));
       pos.forEach((p, q) => { pooled[a][p] = pr[q]; });
       perFold[a].push("error" in m ? null : scoreRows(task, tout, pr));
     });
+    spec.trace?.leave();
   }
   const scores = K.map((_, a) => {
     if (task.kind === "binary") return scoreRows(task, T, pooled[a]);
@@ -201,9 +214,10 @@ export function chooseK(X: (number | null)[][], task: Task, T: number[], spec: N
  * 予測には係数が 0 でない列だけを使う（その列の値が欠けていれば null）。
  */
 export function fitLassoOn(X: (number | null)[][], task: Task, T: number[], spec: NestedCvSpec, model: Extract<ModelSpec, { kind: "lasso" }>, rng: Rng): { choice: InnerChoice; trained: Trained } | { error: string } {
-  const imp = imputeByTrain(X, T, spec.impute);
+  const imp = imputeByTrain(X, T, spec.impute, spec.trace);
   const cols = imp.usable.map((u, j) => (u ? j : -1)).filter((j) => j >= 0);
   if (!cols.length) return { error: "使える特徴量がありません" };
+  spec.trace?.note("fit", T);
   const r = lassoCv(task, imp.X, T, cols, { nLambda: model.nLambda, ratio: lassoRatioFor(T.length, cols.length), folds: spec.innerK, rule: model.rule }, rng);
   if ("error" in r) return r;
   const nz = r.std.cols.map((c, a) => ({ c, a })).filter((x) => r.coef.beta[x.a] !== 0);
@@ -226,7 +240,8 @@ export function fitLassoOn(X: (number | null)[][], task: Task, T: number[], spec
  * RF・SVM・GBM を、訓練の行 train で当てはめる（二値だけ）。使う列は imp.usable の全部。
  * SVM だけ、訓練の行の平均・SD で標準化し、γ の "scale" も標準化した訓練の行から求める。
  */
-export function fitMl(imp: Imputed, task: Task, train: number[], h: Hyper, kind: MlSpec["kind"], rng: Rng): Trained | { error: string } {
+export function fitMl(imp: Imputed, task: Task, train: number[], h: Hyper, kind: MlSpec["kind"], rng: Rng, trace?: RowTrace): Trained | { error: string } {
+  trace?.note("fit", train);
   if (task.kind !== "binary") return { error: "ランダムフォレスト・SVM・勾配ブースティングは二値の結果だけです" };
   const cols = imp.usable.map((u, j) => (u ? j : -1)).filter((j) => j >= 0);
   if (!cols.length) return { error: "使える特徴量がありません" };
@@ -266,12 +281,14 @@ export function chooseHyper(X: (number | null)[][], task: Task, T: number[], spe
   const pooled: (number | null)[][] = grid.map(() => new Array<number | null>(T.length).fill(null));
   for (let f = 0; f < spec.innerK; f++) {
     const tin = T.filter((_, p) => folds[p] !== f), pos = T.map((_, p) => p).filter((p) => folds[p] === f);
-    const imp = imputeByTrain(X, tin, spec.impute);
+    spec.trace?.enter(f, tin);
+    const imp = imputeByTrain(X, tin, spec.impute, spec.trace);
     grid.forEach((h, a) => {
-      const m = fitMl(imp, task, tin, h, model.kind, rng);
+      const m = fitMl(imp, task, tin, h, model.kind, rng, spec.trace);
       if ("error" in m) return;
       pos.forEach((p) => { pooled[a][p] = m.predict(T[p]); });
     });
+    spec.trace?.leave();
   }
   // 束ねた AUC は、内側のどこかで当てはめに失敗した点（予測が欠けた行がある点）を評価しない
   const scores = grid.map((_, a) => (pooled[a].some((v) => v === null) ? null : scoreRows(task, T, pooled[a])));
@@ -366,6 +383,7 @@ export async function nestedCv(X: (number | null)[][], task: Task, dev: number[]
   const m = X[0]?.length ?? 0;
   const counts = new Array<number>(m).fill(0);
   const fixed = leak.rankOnAll ? rankFeatures(imputeByTrain(X, dev, spec.impute), task, dev) : null;
+  if (fixed) spec.trace?.note("rank", dev);
   const folds: OuterFold[] = [], outerAssign: number[][] = [], innerAssign: number[][][] = [], pred: (number | null)[][] = [], pooled: (number | null)[] = [];
   const total = spec.repeats * spec.outerK;
   for (let r = 0; r < spec.repeats; r++) {
@@ -377,13 +395,17 @@ export async function nestedCv(X: (number | null)[][], task: Task, dev: number[]
       await tick?.("nested-cv", (r * spec.outerK + f) / total);
       const T = dev.filter((_, p) => assign[p] !== f), pos = dev.map((_, p) => p).filter((p) => assign[p] === f);
       const V = pos.map((p) => dev[p]);
+      if (spec.trace) {
+        spec.trace.scope = `r${r}f${f}`;
+        spec.trace.contexts.set(spec.trace.scope, { train: T });
+      }
       if (isMl(spec.model)) {
         const ch = chooseHyper(X, task, T, spec, spec.model, rng);
         inner.push(ch.folds);
         const row: OuterFold = { repeat: r, fold: f, nTrain: T.length, nTest: V.length, k: null, lambda: null, params: ch.params ?? null, innerScores: ch.scores, cols: [], score: null, error: null };
         if (!ch.params) row.error = "内側の交差検証で、どの候補も評価できませんでした";
         else {
-          const mdl = fitMl(imputeByTrain(X, T, spec.impute), task, T, ch.params, spec.model.kind, rng);
+          const mdl = fitMl(imputeByTrain(X, T, spec.impute, spec.trace), task, T, ch.params, spec.model.kind, rng, spec.trace);
           if ("error" in mdl) row.error = mdl.error;
           else {
             row.cols = mdl.cols;
@@ -414,13 +436,14 @@ export async function nestedCv(X: (number | null)[][], task: Task, dev: number[]
         folds.push(row);
         continue;
       }
-      const ch = chooseK(X, task, T, spec, rng, fixed);
+      const ch = chooseK(X, task, T, spec, rng, fixed, fixed ? dev : null);
       inner.push(ch.folds);
       const row: OuterFold = { repeat: r, fold: f, nTrain: T.length, nTest: V.length, k: ch.k, lambda: null, params: null, innerScores: ch.scores, cols: [], score: null, error: null };
       if (ch.k === null) row.error = "内側の交差検証で、どの候補も評価できませんでした";
       else {
-        const imp = imputeByTrain(X, T, spec.impute);
-        const mdl = fitTopK(imp, task, T, fixed ?? rankFeatures(imp, task, T), ch.k);
+        const imp = imputeByTrain(X, T, spec.impute, spec.trace);
+        spec.trace?.note("rank", fixed ? dev : T);
+        const mdl = fitTopK(imp, task, T, fixed ?? rankFeatures(imp, task, T), ch.k, spec.trace);
         if ("error" in mdl) row.error = mdl.error;
         else {
           row.cols = mdl.cols;
@@ -459,10 +482,14 @@ export interface FinalModel {
  * 入れ子の交差検証の推定値は「この手順全体」の性能で、このモデルそのものの性能ではない。
  */
 export function finalModel(X: (number | null)[][], task: Task, dev: number[], spec: NestedCvSpec, rng: Rng): FinalModel {
+  if (spec.trace) {
+    spec.trace.scope = "final";
+    spec.trace.contexts.set("final", { train: dev });
+  }
   if (isMl(spec.model)) {
     const choice = chooseHyper(X, task, dev, spec, spec.model, rng);
     if (!choice.params) return { choice, model: null, error: "交差検証で、どの候補も評価できませんでした" };
-    const mdl = fitMl(imputeByTrain(X, dev, spec.impute), task, dev, choice.params, spec.model.kind, rng);
+    const mdl = fitMl(imputeByTrain(X, dev, spec.impute, spec.trace), task, dev, choice.params, spec.model.kind, rng, spec.trace);
     if ("error" in mdl) return { choice, model: null, error: mdl.error };
     return { choice: { ...choice, k: mdl.cols.length }, model: mdl, error: null };
   }
@@ -473,7 +500,8 @@ export function finalModel(X: (number | null)[][], task: Task, dev: number[], sp
   }
   const choice = chooseK(X, task, dev, spec, rng, null);
   if (choice.k === null) return { choice, model: null, error: "交差検証で、どの候補も評価できませんでした" };
-  const imp = imputeByTrain(X, dev, spec.impute);
-  const mdl = fitTopK(imp, task, dev, rankFeatures(imp, task, dev), choice.k);
+  const imp = imputeByTrain(X, dev, spec.impute, spec.trace);
+  spec.trace?.note("rank", dev);
+  const mdl = fitTopK(imp, task, dev, rankFeatures(imp, task, dev), choice.k, spec.trace);
   return "error" in mdl ? { choice, model: null, error: mdl.error } : { choice, model: mdl, error: null };
 }

@@ -1,7 +1,8 @@
 import { CsvError, parseCsv } from "../core/csv";
 import { sha256Hex } from "../core/digest";
 import { datasetCsv } from "../core/exportDataset";
-import { defaultFeatureColumns, type Dataset, type JoinReport, type TableSource } from "../core/dataset";
+import { buildDataset, defaultFeatureColumns, type Dataset, type JoinReport, type RowFilter, type TableSource } from "../core/dataset";
+import { idLikeColumns, targetLeaks, type TargetLeak } from "../core/leak";
 import { runSkill, type RunRecord } from "../core/engine";
 import { kmPointsCsv, r1ResultsCsv } from "../core/exportR1";
 import { assignPair, joinNotes, suggestJoin, type JoinNote, type PairOverlap } from "../core/joinQc";
@@ -36,6 +37,7 @@ const VERSION = typeof __PLUGIN_VERSION__ === "string" ? __PLUGIN_VERSION__ : "d
 const SKILLS: Skill[] = [R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE, R5_MODEL];
 const SKILL_LABEL: Record<string, Key> = { [R1_PROGNOSIS.id]: "skillR1", [R2_DISCRIMINATION.id]: "skillR2", [R3_REPRODUCIBILITY.id]: "skillR3", [P4_PIPELINE.id]: "skillP4", [R5_MODEL.id]: "skillR5" };
 const LIST_LIMIT = 50;
+const UNIT_COLUMNS = ["Unit", "PlaneSource", "Plane"];
 
 interface CheckState {
   status: "idle" | "running" | "done";
@@ -66,6 +68,10 @@ interface State {
   check: CheckState;
   /** 特徴量の表の列 × 臨床の表の列の重なり（重なりが大きい順）。 */
   pairs: PairOverlap[];
+  /** 解析に使う単位（Unit・PlaneSource・Plane）ごとに選んだ値。 */
+  unitSel: Record<string, string[]>;
+  /** 利用者が特徴量から外した列。 */
+  excluded: string[];
   /** 開いている <details>（描き直しても閉じない）。 */
   open: Set<string>;
   progress: { label: string; fraction: number } | null;
@@ -95,7 +101,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
   const s: State = {
     features: [], clinical: null, baseline: [], followup: [], exclusion: null, lock: null, errors: [],
     params: { ...DATASET_CHECK.defaults, ...R1_DEFAULTS, ...R2_DEFAULTS, ...R3_DEFAULTS, ...P4_DEFAULTS, ...R5_DEFAULTS },
-    seed: 1, noSha: false, skill: null, check: IDLE, pairs: [], open: new Set(), progress: null, cancelled: false, selectedFeature: null,
+    seed: 1, noSha: false, skill: null, check: IDLE, pairs: [], unitSel: {}, excluded: [], open: new Set(), progress: null, cancelled: false, selectedFeature: null,
     ba: { feature: null, a: 0, b: 1 }, result: null,
   };
   root.replaceChildren();
@@ -171,6 +177,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
   function filesChanged() {
     s.result = null;
     s.selectedFeature = null;
+    applyUnitDefault();
     applyJoinSuggestion();
     void recomputeCheck();
     render();
@@ -215,6 +222,56 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       clinicalId = sj.clinicalId || null;
     }
     s.params = { ...s.params, featureIdColumn: featureId, patientColumn: patient, clinicalIdColumn: clinicalId, reliabilityIdColumn: hint.featureId || null };
+  }
+
+  /** 特徴量の表にある Unit・PlaneSource・Plane の値と件数。 */
+  function unitColumns(): { column: string; values: { value: string; count: number }[] }[] {
+    const head = s.features[0]?.table.header ?? [];
+    return UNIT_COLUMNS.filter((c) => head.includes(c)).map((column) => {
+      const counts = new Map<string, number>();
+      for (const f of s.features) {
+        const j = f.table.header.indexOf(column);
+        if (j < 0) continue;
+        for (const r of f.table.rows) counts.set((r[j] ?? "").trim(), (counts.get((r[j] ?? "").trim()) ?? 0) + 1);
+      }
+      return { column, values: [...counts].map(([value, count]) => ({ value, count })).sort((a, b) => a.value.localeCompare(b.value)) };
+    });
+  }
+
+  /** 既定: Unit に WHOLE_3D があればそれだけ。それ以外は全部の値。 */
+  function applyUnitDefault() {
+    const sel: Record<string, string[]> = {};
+    for (const u of unitColumns()) {
+      const all = u.values.map((v) => v.value);
+      sel[u.column] = u.column === "Unit" && all.includes("WHOLE_3D") ? ["WHOLE_3D"] : all;
+    }
+    s.unitSel = sel;
+    syncSelection();
+  }
+
+  /** 選んだ単位と外した列を、実行の設定（rowFilter・excludeFeatureColumns）へ写す。全部の値を選んだ列は絞り込みにしない。 */
+  function syncSelection() {
+    const head = s.features[0]?.table.header ?? [];
+    const rowFilter: RowFilter[] = unitColumns()
+      .filter((u) => (s.unitSel[u.column] ?? []).length < u.values.length)
+      .map((u) => ({ column: u.column, values: s.unitSel[u.column] ?? [] }));
+    s.excluded = s.excluded.filter((c) => head.includes(c));
+    s.params = { ...s.params, rowFilter, excludeFeatureColumns: [...s.excluded] };
+  }
+
+  function excludeColumn(name: string, on: boolean) {
+    s.excluded = on ? [...new Set([...s.excluded, name])] : s.excluded.filter((c) => c !== name);
+    syncSelection();
+    s.result = null;
+    void recomputeCheck();
+    render();
+  }
+
+  /** 特徴量として使う列（既定の候補から、利用者が外した列を除く）。 */
+  function usedFeatureColumns(): string[] {
+    const p = s.params;
+    return defaultFeatureColumns({ header: s.features[0]?.table.header ?? [], rows: s.features.flatMap((x) => x.table.rows) }, [p.featureIdColumn as string | null, p.patientColumn as string | null])
+      .filter((c) => !s.excluded.includes(c));
   }
 
   /** 臨床の表を読み直したときの、目的変数の列の初期値（列名からの推測。選び直せる）。 */
@@ -327,6 +384,81 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       h("button", { type: "button", "data-testid": "rs-check-save-record", onclick: () => download(`${JSON.stringify(record, null, 2)}\n`, "research-stats-record.json", "application/json") }, t("saveRecord")));
   }
 
+  /** 解析に使う単位: 列ごとの実際の値のチェック一覧（件数つき）。 */
+  function unitBlock(): HTMLElement | null {
+    const units = unitColumns();
+    if (!units.length) return null;
+    return h("div", { "data-testid": "rs-units" },
+      h("h3", {}, t("unitTitle")),
+      h("div", { class: "rs-note" }, t("unitHelp")),
+      ...units.map((u) => h("div", { class: "rs-row" },
+        h("label", {}, u.column),
+        h("div", { class: "rs-chips", "data-testid": `rs-unit-${u.column}` },
+          ...u.values.map((v) => h("label", {}, h("input", {
+            type: "checkbox", "data-testid": `rs-unit-${u.column}-${v.value || "empty"}`, checked: (s.unitSel[u.column] ?? []).includes(v.value),
+            onchange: (e: Event) => {
+              const on = (e.target as HTMLInputElement).checked;
+              const cur = s.unitSel[u.column] ?? [];
+              s.unitSel = { ...s.unitSel, [u.column]: on ? [...cur, v.value] : cur.filter((x) => x !== v.value) };
+              syncSelection();
+              s.result = null;
+              void recomputeCheck();
+              render();
+            },
+          }), ` ${v.value || t("unitEmpty")} (${v.count})`))))));
+  }
+
+  const REASON_KEY: Record<string, Key> = { name: "leakReasonName", uid: "leakReasonUid", dateTime: "leakReasonDate", sequential: "leakReasonSeq" };
+
+  /** ID・由来・記録の列が特徴量に混ざっていないか。除外済み（既定の選択が外した列）と、警告（使っている列）を分ける。 */
+  function idLikeBlock(used: string[]): HTMLElement | null {
+    const tables = s.features.map((f) => f.table);
+    const p = s.params;
+    const flagged = idLikeColumns(tables, [p.featureIdColumn as string | null, p.patientColumn as string | null], used);
+    const warn = flagged.filter((x) => x.used);
+    const auto = flagged.filter((x) => !x.used && !s.excluded.includes(x.column));
+    const reasonText = (x: { reasons: string[] }) => x.reasons.map((r) => t(REASON_KEY[r])).join("・");
+    if (!warn.length && !auto.length && !s.excluded.length) return null;
+    return h("div", { "data-testid": "rs-leak-cols" },
+      warn.length ? h("div", { class: "rs-warn", "data-testid": "rs-leak-cols-warn" }, h("b", {}, t("leakColsWarn")),
+        h("ul", {}, ...warn.map((x) => h("li", { "data-testid": "rs-leak-col" }, `${x.column}（${reasonText(x)}） `,
+          h("button", { type: "button", "data-testid": `rs-leak-exclude-${x.column}`, onclick: () => excludeColumn(x.column, true) }, t("leakExclude")))))) : null,
+      s.excluded.length ? h("div", { class: "rs-note", "data-testid": "rs-leak-user-excluded" }, t("leakUserExcluded"),
+        h("ul", {}, ...s.excluded.map((c) => h("li", {}, `${c} `, h("button", { type: "button", "data-testid": `rs-leak-restore-${c}`, onclick: () => excludeColumn(c, false) }, t("leakRestore")))))) : null,
+      auto.length ? h("details", { "data-testid": "rs-leak-auto", open: s.open.has("rs-leak-auto"), ontoggle: toggled("rs-leak-auto") },
+        h("summary", {}, `${t("leakAuto")}（${auto.length}）`), h("ul", {}, ...auto.map((x) => h("li", {}, `${x.column}（${reasonText(x)}）`)))) : null);
+  }
+
+  let targetKey = "";
+  let targetCache: TargetLeak[] = [];
+  /** 役割が決まった目的変数と、特徴量の混入。役割ごとに、その解析で使う列だけ。 */
+  function targetLeakList(): TargetLeak[] {
+    if (!s.skill || !s.clinical || isR3()) return [];
+    const p = sanitizeRoles(rolesForSkill(s.skill.id, s.params), s.params);
+    const roles = { time: p.timeColumn as string | null, event: p.eventColumn as string | null, outcome: p.outcomeColumn as string | null };
+    if (!roles.time && !roles.event && !roles.outcome) return [];
+    const key = JSON.stringify([roles, s.params.featureIdColumn, s.params.patientColumn, s.params.clinicalIdColumn, s.params.rowFilter, s.excluded, s.features.map((f) => f.sha256 ?? f.name), s.clinical.sha256 ?? s.clinical.name]);
+    if (key === targetKey) return targetCache;
+    const r = buildDataset({
+      features: s.features, featureIdColumn: s.params.featureIdColumn as string, patientColumn: s.params.patientColumn as string | null, featureColumns: null,
+      excludeColumns: s.excluded, rowFilter: s.params.rowFilter as RowFilter[], clinical: s.clinical, clinicalIdColumn: s.params.clinicalIdColumn as string,
+      roles: { ...roles, covariates: [] },
+    });
+    targetKey = key;
+    targetCache = r.ok ? targetLeaks(r.dataset) : [];
+    return targetCache;
+  }
+
+  const KIND_KEY: Record<string, Key> = { sameName: "leakKindName", identical: "leakKindIdentical", separates: "leakKindSeparates", rankIdentical: "leakKindRank" };
+
+  function targetLeakBlock(): HTMLElement | null {
+    const list = targetLeakList();
+    if (!list.length) return null;
+    return h("div", { class: "rs-warn", "data-testid": "rs-leak-target" }, h("b", {}, t("leakTargetWarn")),
+      h("ul", {}, ...list.map((x) => h("li", { "data-testid": "rs-leak-target-item" }, `${x.feature} ↔ ${x.target}: ${x.kinds.map((k) => t(KIND_KEY[k])).join("・")} `,
+        h("button", { type: "button", "data-testid": `rs-leak-target-exclude-${x.feature}`, onclick: () => excludeColumn(x.feature, true) }, t("leakExclude"))))));
+  }
+
   function checkSection(): Section {
     const title = t("secCheck");
     const fh = s.features[0]?.table.header ?? [];
@@ -338,7 +470,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     const ch = s.clinical.table.header;
     const p = s.params;
     const set = (k: string) => (v: string | null) => { s.params = { ...s.params, [k]: v }; s.result = null; void recomputeCheck(); render(); };
-    const cols = defaultFeatureColumns({ header: fh, rows: s.features.flatMap((x) => x.table.rows) }, [p.featureIdColumn as string | null, p.patientColumn as string | null]);
+    const cols = usedFeatureColumns();
     const c = s.check;
     const rep = c.report;
     const best = s.pairs[0];
@@ -351,7 +483,9 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         ? h("div", { class: "rs-note", "data-testid": "rs-best-pair" }, t("bestPair", { f: best.featureColumn, c: best.clinicalColumn, n: best.normalized }))
         : null,
       pairsTable(),
+      unitBlock(),
       h("div", { class: "rs-note", "data-testid": "rs-feature-count" }, t("featureCount", { n: cols.length })),
+      idLikeBlock(cols),
     ];
     if (c.status === "running") body.push(h("div", { class: "rs-note", "data-testid": "rs-check-running" }, t("checkRunning")));
     if (c.status === "done") {
@@ -366,6 +500,8 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
           h("div", { class: "rs-big", "data-testid": "rs-joined" }, t("joined", { n: rep.joined })),
           h("div", { "data-testid": "rs-counts" }, t("counts", { rows: rep.featureRows, pf: rep.patientsInFeatures, pc: rep.patientsInClinical, fo: rep.featureOnly.length, co: rep.clinicalOnly.length })),
           rep.lesionsPerPatient ? h("div", { class: "rs-note" }, t("lesions", rep.lesionsPerPatient)) : null,
+          rep.filteredRows > 0 ? h("div", { class: "rs-note", "data-testid": "rs-filtered" }, t("unitFiltered", { n: rep.filteredRows })) : null,
+          rep.averagedRows > 0 && unitColumns().length ? h("div", { class: "rs-warn", "data-testid": "rs-note-averaged" }, t("unitAveraged", { n: rep.averagedRows, p: rep.averagedPatients })) : null,
           idList(t("featureOnly"), rep.featureOnly, "rs-feature-only"),
           idList(t("clinicalOnly"), rep.clinicalOnly, "rs-clinical-only"),
           rep.missing.length
@@ -406,6 +542,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
         row,
         h("div", { class: "rs-note" }, s.skill.question[locale]),
         target.length ? h("h3", {}, t("target")) : null, ...target,
+        targetLeakBlock(),
         main.length ? h("h3", {}, t("settings")) : null, ...main,
         more.length ? h("details", { "data-testid": "rs-params", open: s.open.has("params"), ontoggle: toggled("params") }, h("summary", {}, t("moreParams")), ...more) : null,
       ],
@@ -516,7 +653,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       p.groupMode === "value" ? numberRow("rs-group-value", t("groupValue"), "groupValue", { emptyIsNull: true }) : null,
     ]);
     if (p.groupMode === "optimal") {
-      const m = defaultFeatureColumns({ header: s.features[0]?.table.header ?? [], rows: s.features.flatMap((x) => x.table.rows) }, [p.featureIdColumn as string | null, p.patientColumn as string | null]).length;
+      const m = usedFeatureColumns().length;
       if (m) main.push(h("div", { class: "rs-note", "data-testid": "rs-heavy" }, t("heavy", { m, b: Number(p.permutations) })));
     }
     const more = compact([

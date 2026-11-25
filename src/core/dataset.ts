@@ -22,6 +22,12 @@ export interface Roles {
   covariates: string[];
 }
 
+/** 行の絞り込み: 列の値が values のどれかである行だけを使う。 */
+export interface RowFilter {
+  column: string;
+  values: string[];
+}
+
 export interface DatasetSpec {
   /** 同じ見出しの表。行を連ねる（症例ごとに 1 ファイルの書き出しを並べる使い方）。 */
   features: TableSource[];
@@ -31,6 +37,10 @@ export interface DatasetSpec {
   patientColumn: string | null;
   /** 使う特徴量の列。null なら {@link defaultFeatureColumns}。 */
   featureColumns: string[] | null;
+  /** 既定の特徴量の列（featureColumns が null のとき）から外す列。 */
+  excludeColumns?: string[];
+  /** 特徴量の表の行の絞り込み（すべてを満たす行だけ使う）。 */
+  rowFilter?: RowFilter[];
   clinical: TableSource;
   clinicalIdColumn: string;
   roles: Roles;
@@ -56,6 +66,11 @@ export interface Exclusion {
 export interface JoinReport {
   featureFiles: number;
   featureRows: number;
+  /** 行の絞り込みで外した行数。 */
+  filteredRows: number;
+  /** 同じ患者に複数行あり、平均で 1 行にまとめた患者の数と、その行数の合計。 */
+  averagedPatients: number;
+  averagedRows: number;
   patientsInFeatures: number;
   patientsInClinical: number;
   joined: number;
@@ -115,6 +130,7 @@ export interface FeatureRow {
 /** 特徴量の表（複数）を読んで、行ごとの値にする。問題があれば errors に積む。 */
 export function readFeatureRows(
   sources: readonly TableSource[], idColumn: string, patientColumn: string | null, columns: string[] | null, errors: string[],
+  opts: { excludeColumns?: readonly string[]; defaultsFrom?: readonly TableSource[] } = {},
 ): { rows: FeatureRow[]; columns: string[] } {
   if (sources.length === 0) {
     errors.push("特徴量の表がありません");
@@ -132,7 +148,7 @@ export function readFeatureRows(
     if (!head.includes(col)) errors.push(`特徴量の表に列「${col}」がありません`);
   }
   if (errors.length) return { rows: [], columns: [] };
-  const cols = columns ?? defaultFeatureColumns(mergeTables(sources), [idColumn, patientColumn]);
+  const cols = columns ?? defaultFeatureColumns(mergeTables(opts.defaultsFrom ?? sources), [idColumn, patientColumn]).filter((c) => !opts.excludeColumns?.includes(c));
   const bad = cols.filter((c) => !head.includes(c));
   if (bad.length) errors.push(`特徴量の列がありません: ${preview(bad)}`);
   if (cols.length === 0) errors.push("使える特徴量の列がありません（数値の列が 1 つもありません）");
@@ -140,6 +156,7 @@ export function readFeatureRows(
   const rows: FeatureRow[] = [];
   const seen = new Set<string>();
   const nonNumeric: string[] = [];
+  let dupId = false;
   for (const s of sources) {
     const t = s.table;
     const iId = t.header.indexOf(idColumn);
@@ -152,7 +169,10 @@ export function readFeatureRows(
         errors.push(`${s.name} の ${k + 2} 行目: 「${id === "" ? idColumn : patientColumn}」が空です`);
         return;
       }
-      if (seen.has(id)) errors.push(`行の ID「${id}」が重複しています（${s.name}）`);
+      if (seen.has(id)) {
+        errors.push(`行の ID「${id}」が重複しています（${s.name}）`);
+        dupId = true;
+      }
       seen.add(id);
       const values = iCols.map((j, m) => {
         const v = numberOrNull(r[j]);
@@ -165,6 +185,11 @@ export function readFeatureRows(
       rows.push({ id, patient, values });
     });
   }
+  if (dupId) {
+    const units = ["Unit", "PlaneSource", "Plane"].filter((c) => head.includes(c));
+    const parts = [head.includes("RowKey") ? "「RowKey」を行の ID にする" : null, units.length ? `${units.join("・")} で絞り込む` : null].filter((x) => x !== null);
+    if (parts.length) errors.push(`${parts.join("か、")}と解決できる場合があります（2D の単位を選んだ一括抽出の表は、同じ症例の行が複数になります）`);
+  }
   if (nonNumeric.length) errors.push(`特徴量の列に数でない値があります: ${nonNumeric.join(" ／ ")}`);
   return { rows, columns: cols };
 }
@@ -174,9 +199,32 @@ function mergeTables(sources: readonly TableSource[]): CsvTable {
   return { header: sources[0].table.header, rows: sources.flatMap((s) => s.table.rows) };
 }
 
+/** 行の絞り込みを適用する。表に無い列・1 行も残らない絞り込みは errors に積む。外した行数を返す。 */
+export function applyRowFilter(sources: readonly TableSource[], filter: readonly RowFilter[], errors: string[]): { sources: TableSource[]; removed: number } {
+  if (!filter.length) return { sources: [...sources], removed: 0 };
+  for (const f of filter) {
+    for (const s of sources) if (!s.table.header.includes(f.column)) errors.push(`${s.name}: 絞り込みの列「${f.column}」がありません`);
+  }
+  if (errors.length) return { sources: [...sources], removed: 0 };
+  let removed = 0, kept = 0;
+  const out = sources.map((s) => {
+    const idx = filter.map((f) => ({ j: s.table.header.indexOf(f.column), values: new Set(f.values) }));
+    const rows = s.table.rows.filter((r) => idx.every((x) => x.values.has((r[x.j] ?? "").trim())));
+    removed += s.table.rows.length - rows.length;
+    kept += rows.length;
+    return { ...s, table: { header: s.table.header, rows } };
+  });
+  if (kept === 0) errors.push(`行の絞り込み（${filter.map((f) => `${f.column} = ${f.values.join("・") || "なし"}`).join("、")}）で、1 行も残りません`);
+  return { sources: out, removed };
+}
+
 export function buildDataset(spec: DatasetSpec): BuildResult {
   const errors: string[] = [];
-  const { rows, columns } = readFeatureRows(spec.features, spec.featureIdColumn, spec.patientColumn, spec.featureColumns, errors);
+  const filtered = applyRowFilter(spec.features, spec.rowFilter ?? [], errors);
+  if (errors.length) return { ok: false, errors };
+  const { rows, columns } = readFeatureRows(filtered.sources, spec.featureIdColumn, spec.patientColumn, spec.featureColumns, errors, {
+    excludeColumns: spec.excludeColumns, defaultsFrom: spec.features,
+  });
 
   // 臨床
   const ct = spec.clinical.table;
@@ -278,12 +326,16 @@ export function buildDataset(spec: DatasetSpec): BuildResult {
   if (joinedIds.length === 0) warnings.push("結合できた患者が 0 人です（ID の列の割り当てを確かめてください）");
 
   const counts = lesionCounts;
+  const multi = featureIds.map((id) => byPatient.get(id)!.length).filter((n) => n > 1);
   return {
     ok: true,
     dataset: { ids: joinedIds, featureNames: columns, features, lesionCounts, clinical },
     report: {
       featureFiles: spec.features.length,
       featureRows: rows.length,
+      filteredRows: filtered.removed,
+      averagedPatients: multi.length,
+      averagedRows: multi.reduce((a, b) => a + b, 0),
       patientsInFeatures: featureIds.length,
       patientsInClinical: clinicalById.size,
       joined: joinedIds.length,

@@ -26,6 +26,8 @@ export interface QcResult {
   removed: QcRemoval[];
   /** 除外リストにあるが表に無かった名前。 */
   unknownExcluded: string[];
+  /** 値を読んだ行（分散 0・相関の判定に使った行）。値を読まなければ空。 */
+  usedRows: number[];
 }
 
 /** 平均順位（同順位は平均）。 */
@@ -71,7 +73,11 @@ export function qcFeatures(X: (number | null)[][], rows: number[], names: string
       return false;
     });
   }
-  const colOf = (j: number) => rows.map((i) => X[i][j]);
+  let read = false;
+  const colOf = (j: number) => {
+    read = true;
+    return rows.map((i) => X[i][j]);
+  };
   if (o.dropConstant) {
     cand = cand.filter((j) => {
       const vals = colOf(j).filter((v): v is number => v !== null);
@@ -97,5 +103,5 @@ export function qcFeatures(X: (number | null)[][], rows: number[], names: string
     }
     cand = kept.sort((a, b) => a - b);
   }
-  return { keep: cand, removed, unknownExcluded };
+  return { keep: cand, removed, unknownExcluded, usedRows: read ? rows : [] };
 }
