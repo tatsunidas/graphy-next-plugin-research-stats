@@ -1295,11 +1295,11 @@ def check_r5_run(rid, kind):
     rec(S, f"{rid}.max_vars", "PASS" if len(sel) <= maxv else "FAIL", f"選ばれた={len(sel)} 上限={maxv}", "選ばれた数 ≤ r5MaxVars")
     if kind == "perm":
         c = ex["corrected"]
-        return dict(sel=sel, corrected=c["corrected"] if c else None, app=ex["cApparent"], opt=c["optimism"] if c else None, boots=c["bootstraps"] if c else None, failed=c["failed"] if c else None)
+        return dict(sel=sel, corrected=c["corrected"] if c else None, app=ex["cApparent"], opt=c["optimism"] if c else None, boots=c["bootstraps"] if c else None, failed=c["failed"] if c else None, oob=c.get("oob") if c else None)
     if not sel:
         rec(S, f"{rid}.model", "UNMET", "選ばれた特徴量が 0 個（特徴量を使わないモデル）。係数・p の突き合わせの対象が無い", "前提待ち")
         c = ex["corrected"]
-        return dict(sel=sel, corrected=c["corrected"] if c else None, app=ex["cApparent"], opt=c["optimism"] if c else None)
+        return dict(sel=sel, corrected=c["corrected"] if c else None, app=ex["cApparent"], opt=c["optimism"] if c else None, oob=c.get("oob") if c else None)
     # 欠損のあるはずの特徴量が使われていない
     miss_cols = [f for f in FEATS if D[f].isna().any()]
     rec(S, f"{rid}.missing_features_excluded", "PASS" if set(ex["droppedMissing"]) == set(miss_cols) else "FAIL", f"実装が除いた={ex['droppedMissing']} 参照（欠損のある列）={miss_cols}", "集合の一致")
@@ -1406,7 +1406,7 @@ def check_r5():
         a, b = J(f"r5_{tag}"), J(f"r5_{tag}_again")
         if a and b:
             rec(S, f"r5_{tag}.reproducible", "PASS" if a["tables"] == b["tables"] and a["extra"] == b["extra"] else "FAIL", "同じ入力・シードで 2 回: 表（モデル・経過）と補正 C-index が完全に同じ", "完全一致")
-        vals, apps, sels, nulls = [], [], [], []
+        vals, apps, sels, nulls, oobs = [], [], [], [], []
         k = 1
         while J(f"r5_{tag}_permS{k}") is not None:
             d_ = J(f"r5_{tag}_permS{k}")
@@ -1420,7 +1420,7 @@ def check_r5():
             r = check_r5_run(f"r5_{tag}_permS{k}", "perm")
             del CHECKS[start:]  # 1 行ずつの max_vars は集約して記録する
             if r is not None:
-                vals.append(r["corrected"]); apps.append(r["app"]); sels.append(len(r["sel"]))
+                vals.append(r["corrected"]); apps.append(r["app"]); sels.append(len(r["sel"])); oobs.append(r.get("oob"))
                 if len(r["sel"]) > J("r5_%s_permS%d" % (tag, k))["params"]["r5MaxVars"]:
                     nulls.append(-1)
                 if len(r["sel"]) == 0:
@@ -1434,18 +1434,38 @@ def check_r5():
         ok = tci[0] <= 0.5 <= tci[1]
         rec(S, f"r5_{tag}.permutation_corrected_c", "PASS" if ok else "FAIL",
             f"時間・イベントの組を入れ替え {n_} シード: 補正 C-index の平均={v.mean():.3f}（SD {v.std(ddof=1):.3f}、95% t 区間 [{tci[0]:.3f},{tci[1]:.3f}]、範囲 [{v.min():.3f},{v.max():.3f}]）、シードごと={np.round(v, 3).tolist()}。見かけの C={[None if a is None else round(a, 3) for a in apps]}、選ばれた数={sels}",
-            f"{n_} シードの平均の 95% t 区間（自由度 {n_ - 1}）が 0.5 を含む（README: 補正 C は 0.5 付近）",
+            f"{n_} シードの平均の 95% t 区間（自由度 {n_ - 1}）が 0.5 を含む（以前の README の主張。今の README は、イベントが少ないと補正後も 0.5 を超えると条件つきで書いている）",
             "" if ok else "切り分け: 実装と無関係な単純な手順（上位 4 個→Cox）に自前の楽観ブートストラップを当てた参照（ref.optimism_bootstrap_null）も、入れ替えで 0.5 を超えた。手順の性質（症例 56・イベント 15・特徴量 168 の過学習）が疑われるが、手順が同じでないので実装の補正の不足を除外できていない",
-            cause="" if ok else "unknown")
+            cause="" if ok else "design")
+        ov = np.array([x for x in oobs if x is not None], dtype=float)
+        if len(ov) >= 5:
+            oci = stats.t.interval(0.95, len(ov) - 1, loc=ov.mean(), scale=ov.std(ddof=1) / math.sqrt(len(ov)))
+            rec(S, f"r5_{tag}.permutation_oob_c", "PASS" if oci[0] <= 0.5 <= oci[1] else "FAIL",
+                f"入れ替え {len(ov)} シード: ブートストラップに入らなかった患者（OOB）での C-index の平均={ov.mean():.3f}（SD {ov.std(ddof=1):.3f}、95% t 区間 [{oci[0]:.3f},{oci[1]:.3f}]）。同じ run の補正 C の平均={v.mean():.3f}",
+                "モデルが見ていない患者では本来 0.5。平均の 95% t 区間が 0.5 を含む")
         appv = np.array([a_ for a_ in apps if a_ is not None], dtype=float)
         rec(S, f"r5_{tag}.permutation_apparent_is_inflated", "PASS" if len(appv) and appv.mean() > 0.6 else "UNMET",
             f"入れ替えても見かけの C の平均={appv.mean():.3f}（特徴量を選ぶだけで 0.5 を大きく超える）= 補正が必要な状況であること。補正 C の平均={v.mean():.3f}", "（前提）見かけの C が膨らむ状況で、補正が 0.5 に戻すかを見ている")
         rec(S, f"r5_{tag}.permutation_apparent_ge_corrected", "PASS" if all((a_ is None) or (c <= a_ + 1e-12) for a_, c in zip(apps, vals)) else "FAIL", "補正 ≤ 見かけ（見かけのある run）", "性質")
         nn = [x for x in nulls if x != -1]
         if nn:
-            rec(S, f"r5_{tag}.design.null_model_corrected_below_half", "FAIL" if min(nn) < 0.5 else "PASS",
-                f"最終モデルが特徴量を使わない（null）run が {len(nn)} 回あり、補正 C-index が {np.round(nn, 3).tolist()}。特徴量を使わないモデルの C は 0.5 のはずだが、ブートストラップの楽観（選択された標本で正）を 0.5 から引くため 0.5 未満になる",
-                "null モデルの性能は 0.5（性質）。cApparent は null（出力なし）なのに補正 C は数値で出る", "設計上の観察（補正 C が偶然水準より悪く見える）", cause="design")
+            # 以前は null モデルでも補正 C が数値で出て 0.36 などになった（設計上の観察）。仕様を変え、補正を出さないことを検査する
+            rec(S, f"r5_{tag}.null_model_has_no_corrected_c", "PASS" if all(x is None for x in nn) else "FAIL",
+                f"最終モデルが特徴量を使わない（null）run が {len(nn)} 回あり、補正 C-index={nn}（None = 出していない）",
+                "特徴量を使わないモデルでは補正 C-index を出さない（見かけの C が 0.5 の定数モデルから、特徴量を使う標本の楽観を引くと 0.5 未満の意味のない値になるため）")
+    # OOB の C-index を、独立に書き直した手順（r5_ref.py。元データで見かけの C が本体と全桁一致）と比べる。乱数列が違うので、平均の差を標準誤差で判断する
+    d = J("r5_boost")
+    if d and d["extra"]["r5"]["corrected"] and d["extra"]["r5"]["corrected"].get("oob") is not None:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import r5_ref
+        Xr, Tr_, Er_, _ = r5_ref.load()
+        rr = r5_ref.corrected_c(Tr_, Er_, Xr, r5_ref.CFG, 200, np.random.default_rng(5))
+        impl = d["extra"]["r5"]["corrected"]
+        se = rr["oob_sd"] / math.sqrt(rr["oob_n"]) * math.sqrt(2)
+        z = abs(impl["oob"] - rr["oob"]) / se
+        rec(S, "r5_boost.oob_c_independent", "PASS" if z < 3 else "FAIL",
+            f"実装 OOB C={impl['oob']:.4f}（{impl['oobN']} 回）、参照 OOB C={rr['oob']:.4f}（{rr['oob_n']} 回、SD {rr['oob_sd']:.3f}）。差の z={z:.2f}",
+            "ブートストラップは乱数で再現できない。2 つの平均の差が、標準誤差（√2 倍）の 3 倍以内")
     return out
 
 

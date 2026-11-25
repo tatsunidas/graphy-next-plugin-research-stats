@@ -539,6 +539,8 @@
       "optimism": null,
       "bootstraps": null,
       "bootstrapFailed": null,
+      "cIndexOob": null,
+      "oobN": null,
       "phGlobalP": 0.9423488993116178,
       "splitCheck": null,
       "splitPatients": null

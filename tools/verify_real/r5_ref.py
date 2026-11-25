@@ -222,7 +222,7 @@ def corrected_c(T, E, X, cfg, B, rng):
     if full is None:
         return None
     app = harrell_c(T, E, full(allr))
-    opt = []; fail = 0
+    opt = []; oob = []; fail = 0
     for _ in range(B):
         idx = rng.integers(0, n, n)
         m = procedure(T, E, X, idx, cfg)
@@ -232,7 +232,12 @@ def corrected_c(T, E, X, cfg, B, rng):
         if np.isnan(cb) or np.isnan(ct):
             fail += 1; continue
         opt.append(cb - ct)
-    return dict(apparent=app, optimism=float(np.mean(opt)), corrected=app - float(np.mean(opt)), ok=len(opt), failed=fail)
+        out = np.setdiff1d(allr, idx)
+        co = harrell_c(T[out], E[out], m(out)) if len(out) else np.nan
+        if not np.isnan(co):
+            oob.append(co)
+    return dict(apparent=app, optimism=float(np.mean(opt)), corrected=app - float(np.mean(opt)), ok=len(opt), failed=fail,
+                oob=float(np.mean(oob)) if oob else None, oob_n=len(oob), oob_sd=float(np.std(oob, ddof=1)) if len(oob) > 1 else None)
 
 
 # ---------------------------------------------------------------- データと実行

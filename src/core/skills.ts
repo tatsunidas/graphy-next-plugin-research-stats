@@ -794,7 +794,7 @@ export const R5_MODEL: Skill = {
             capped: r.steps.filter((x) => x.action === "cap").length,
             lambda: r.lasso ? r.lasso.lambda : null,
             cIndexApparent: m.cApparent, cIndexCorrected: m.corrected?.corrected ?? null, optimism: m.corrected?.optimism ?? null,
-            bootstraps: m.corrected?.bootstraps ?? null, bootstrapFailed: m.corrected?.failed ?? null,
+            bootstraps: m.corrected?.bootstraps ?? null, bootstrapFailed: m.corrected?.failed ?? null, cIndexOob: m.corrected?.oob ?? null, oobN: m.corrected?.oobN ?? null,
             phGlobalP: m.schoenfeld?.global.p ?? null,
             splitCheck: st.split ? (st.split.ok ? "OK" : "NG") : null, splitPatients: st.split?.patients.join(", ") || null,
           },

@@ -182,7 +182,10 @@ export async function r5Model(
   const risk = riskOf(res, X);
   const cApparent = res.fit ? cIndex(surv, all.map(risk)) : null;
   let corrected: CorrectedC | null = null;
-  if (p.bootstrapB > 0) {
+  if (p.bootstrapB > 0 && !res.selected.length) {
+    // 特徴量を使わない定数モデルの見かけの C は 0.5。特徴量を使う標本の楽観を引くと、0.5 を下回る意味のない値になる
+    notes.push("最終モデルが特徴量を使わないため、補正 C-index は計算しません");
+  } else if (p.bootstrapB > 0) {
     const fit: FitFn = leak.selectOnce
       ? (idx) => {
         if (!res.selected.length) return () => 0;
