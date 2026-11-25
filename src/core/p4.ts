@@ -17,6 +17,10 @@ import { aucCi, rocPoints, type RocPoint } from "./discrim/roc";
 import { calibrationBins, type CalibrationBin } from "./discrim/calibration";
 import { cIndex } from "./survival/cindex";
 import { qcFeatures, type QcRemoval } from "./pipeline/qc";
+import { assumptionReport } from "./stats/assumptionReport";
+import { pairedDrop, pairedFromDelta, PRE_ASSUMP_DEFAULTS, PRE_PAIRED_DEFAULTS, PRE_UNPAIRED_DEFAULTS, readPre, type PairedInfo, type PairedMatrix, type PreSpec } from "./pipeline/pre";
+import type { DeltaResult } from "./delta";
+import type { AssumptionRow } from "./stats/assumptionReport";
 import { finalModel, gridOf, hyperText, nestedCv, validateMl, validateSpec, type FinalModel, type MlSpec, type NestedCvResult, type NestedCvSpec, type Task } from "./pipeline/nestedCv";
 import { stratifiedHoldout } from "./pipeline/split";
 import { addEvaluation, checkLock, fingerprint, parseLock, sealLock, canonicalJson, LOCK_FORMAT, LOCK_VERSION, type LockFile } from "./pipeline/lockFile";
@@ -47,6 +51,8 @@ export interface P4Params {
   dropConstant: boolean;
   correlationThreshold: number | null;
   missing: MissingMode | null;
+  /** 前処理（分散 0・相関は上の dropConstant・correlationThreshold と同じ値）。 */
+  pre: PreSpec;
   evaluateTest: boolean;
   calibrationBins: number;
   testBootstrapB: number;
@@ -77,6 +83,9 @@ export const P4_DEFAULTS: Record<string, ParamValue> = {
   dropConstant: false,
   correlationThreshold: null,
   missing: null,
+  ...PRE_PAIRED_DEFAULTS,
+  ...PRE_UNPAIRED_DEFAULTS,
+  ...PRE_ASSUMP_DEFAULTS,
   evaluateTest: false,
   calibrationBins: 10,
   testBootstrapB: 500,
@@ -174,13 +183,18 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
   const ct = p.correlationThreshold;
   if (ct !== null && (typeof ct !== "number" || !(ct > 0 && ct <= 1))) return { error: "相関のしきい値は 0 より大きく 1 以下にしてください" };
   if (p.missing !== null && p.missing !== "complete" && p.missing !== "impute") return { error: "欠損の扱いは complete か impute です" };
+  const binary = p.outcomeKind === "binary";
+  const pre = readPre(p, { qc: false, paired: true, unpaired: binary, assumption: binary });
+  if ("error" in pre) return pre;
+  pre.dropConstant = p.dropConstant === true;
+  pre.correlationThreshold = ct as number | null;
   const cb = p.calibrationBins, bb = p.testBootstrapB;
   if (typeof cb !== "number" || !Number.isInteger(cb) || cb < 2 || cb > 50) return { error: "較正の区間の数は 2 以上 50 以下の整数にしてください" };
   if (typeof bb !== "number" || !Number.isInteger(bb) || bb < 100 || bb > 100000) return { error: "テストのブートストラップ回数は 100 以上 100000 以下の整数にしてください" };
   return {
     outcomeKind: p.outcomeKind, positiveLabel: p.outcomeKind === "binary" ? (p.positiveLabel as string) : null, lockMode: p.lockMode, testFraction,
     stratifySurvival: p.stratifySurvival === true, outerK: outerK as number, innerK: innerK as number, repeats: repeats as number, kCandidates: ks, model, lassoRule, lassoNLambda, ml,
-    dropConstant: p.dropConstant === true, correlationThreshold: ct as number | null, missing: (p.missing as MissingMode | null) ?? null,
+    dropConstant: p.dropConstant === true, correlationThreshold: ct as number | null, missing: (p.missing as MissingMode | null) ?? null, pre,
     evaluateTest: p.evaluateTest === true, calibrationBins: cb, testBootstrapB: bb,
   };
 }
@@ -195,21 +209,32 @@ export interface P4Cohort {
   X: (number | null)[][];
   labels: [string, string] | null;
   fingerprint: string;
+  /** 対応ありの p 値による除外用の、症例ごとの前・後の値（前と後の表を読み、除外を有効にしたときだけ）。 */
+  paired: PairedMatrix | null;
 }
 
-export async function buildCohort(d: Dataset, p: P4Params): Promise<P4Cohort | { error: string }> {
+export async function buildCohort(d: Dataset, p: P4Params, delta: DeltaResult | null = null): Promise<P4Cohort | { error: string }> {
+  const withPaired = (c: { patients: number[] }): PairedMatrix | null | { error: string } => {
+    if (!p.pre.paired) return null;
+    if (!delta) return { error: "対応ありの p 値による除外には、前と後の表が要ります" };
+    return pairedFromDelta(d, delta, c.patients);
+  };
   if (p.outcomeKind === "binary") {
     const c = binaryCohort(d, p.positiveLabel as string);
     if ("error" in c) return c;
+    const pm = withPaired(c);
+    if (pm && "error" in pm) return pm;
     const ids = c.patients.map((i) => d.ids[i]);
     const outcome = c.y.map((v) => c.labels[v]);
-    return { ids, outcome, task: { kind: "binary", y: c.y }, names: d.featureNames, X: c.patients.map((i) => d.features[i]), labels: c.labels, fingerprint: await fingerprint(ids, outcome) };
+    return { ids, outcome, task: { kind: "binary", y: c.y }, names: d.featureNames, X: c.patients.map((i) => d.features[i]), labels: c.labels, fingerprint: await fingerprint(ids, outcome), paired: pm };
   }
   const c = survivalCohort(d);
   if ("error" in c) return c;
+  const pm = withPaired(c);
+  if (pm && "error" in pm) return pm;
   const ids = c.patients.map((i) => d.ids[i]);
   const outcome = c.surv.time.map((t, q) => [t, c.surv.event[q]]);
-  return { ids, outcome, task: { kind: "survival", surv: c.surv }, names: d.featureNames, X: c.patients.map((i) => d.features[i]), labels: null, fingerprint: await fingerprint(ids, outcome) };
+  return { ids, outcome, task: { kind: "survival", surv: c.surv }, names: d.featureNames, X: c.patients.map((i) => d.features[i]), labels: null, fingerprint: await fingerprint(ids, outcome), paired: pm };
 }
 
 export const strataOf = (task: Task): number[] => (task.kind === "binary" ? task.y : task.surv.event);
@@ -267,6 +292,11 @@ export interface QcStepResult {
   dev: number[];
   /** 品質管理が値を読んだ行（分散 0・相関）。 */
   usedRows: number[];
+  /** 対応ありの p 値による除外（有効にしたとき）。読んだのは開発集合の前・後の値。 */
+  paired: PairedInfo | null;
+  pairedRows: number[];
+  /** 前提の検定の報告（開発集合の行。報告だけ）。 */
+  assumptions: { alpha: number; rows: AssumptionRow[] } | null;
   impute: boolean;
   missingCells: number;
 }
@@ -274,18 +304,36 @@ export interface QcStepResult {
 /** 品質管理（開発集合だけ）と欠損の扱い。 */
 export function qcAndMissing(c: P4Cohort, dev: number[], test: number[], p: P4Params, exclude: string[] | null): QcStepResult | { error: string } {
   const q = qcFeatures(c.X, dev, c.names, { dropConstant: p.dropConstant, correlationThreshold: p.correlationThreshold, exclude });
-  if (!q.keep.length) return { error: "品質管理の後に残った特徴量がありません" };
+  let keep = q.keep;
+  const removed = [...q.removed];
+  let paired: PairedInfo | null = null;
+  if (p.pre.paired) {
+    if (!c.paired) return { error: "対応ありの p 値による除外には、前と後の表が要ります" };
+    const r = pairedDrop(c.paired, c.names, keep, dev, p.pre.paired);
+    if ("error" in r) return r;
+    keep = r.keep;
+    paired = r.info;
+    removed.push(...r.removed.map((x) => ({ feature: x.feature, reason: `対応あり: ${x.reason.ja}` })));
+  }
+  if (!keep.length) return { error: "品質管理の後に残った特徴量がありません" };
+  let assumptions: QcStepResult["assumptions"] = null;
+  if (p.pre.assumption && c.task.kind === "binary") {
+    const y = c.task.y;
+    const rep = assumptionReport(subMatrix(c.X, keep), keep.map((j) => c.names[j]), dev.filter((i) => y[i] === 0), dev.filter((i) => y[i] === 1), p.pre.assumption.alpha);
+    if ("error" in rep) return rep;
+    assumptions = { alpha: p.pre.assumption.alpha, rows: rep };
+  }
   const rows = [...dev, ...test];
-  const missingCells = rows.reduce((a, i) => a + q.keep.filter((j) => c.X[i][j] === null).length, 0);
+  const missingCells = rows.reduce((a, i) => a + keep.filter((j) => c.X[i][j] === null).length, 0);
   let devOut = dev, droppedDev: string[] = [];
   if (missingCells > 0) {
     if (p.missing === null) return { error: `使う特徴量に欠損が ${missingCells} 個あります。扱い（欠損のある症例を除く／訓練の分割の中央値で補う）を選んでください。0 では補いません` };
     if (p.missing === "complete") {
-      devOut = dev.filter((i) => q.keep.every((j) => c.X[i][j] !== null));
+      devOut = dev.filter((i) => keep.every((j) => c.X[i][j] !== null));
       droppedDev = dev.filter((i) => !devOut.includes(i)).map((i) => c.ids[i]);
     }
   }
-  return { keep: q.keep, removed: q.removed, unknownExcluded: q.unknownExcluded, droppedDev, dev: devOut, usedRows: q.usedRows, impute: p.missing === "impute", missingCells };
+  return { keep, removed, unknownExcluded: q.unknownExcluded, droppedDev, dev: devOut, usedRows: q.usedRows, paired, pairedRows: paired ? dev : [], assumptions, impute: p.missing === "impute", missingCells };
 }
 
 export function specOf(c: P4Cohort, dev: number[], p: P4Params, impute: boolean): NestedCvSpec {

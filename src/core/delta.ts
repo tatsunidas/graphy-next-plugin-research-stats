@@ -34,6 +34,13 @@ export interface DeltaResult {
   featureNames: string[];
   /** [患者][特徴量] の変化率（%）。作れないものは null。 */
   values: (number | null)[][];
+  /**
+   * [患者][特徴量] の前の値・後の値（対応のある検定用）。変化率と同じ順序の定義で作る:
+   * lesion-then-mean は、前後の両方がそろった病変だけを患者で平均（前と後で同じ病変の集合）、
+   * mean-then-change は、患者で平均した前・後。
+   */
+  before: (number | null)[][];
+  after: (number | null)[][];
   problems: DeltaProblem[];
   /** 片方の時点にしか無い病変（変化率に使わない）。 */
   unmatched: { id: string; where: "baseline" | "followup" }[];
@@ -73,9 +80,21 @@ export function buildDelta(spec: DeltaSpec): DeltaBuild {
     group.get(p.before.patient)!.push(p);
   }
   const problems: DeltaProblem[] = [];
+  const before: (number | null)[][] = [], after: (number | null)[][] = [];
   const values = patients.map((pid) => {
     const list = group.get(pid)!;
+    const bRow: (number | null)[] = [], aRow: (number | null)[] = [];
+    before.push(bRow);
+    after.push(aRow);
     return b.columns.map((name, m) => {
+      if (spec.order === "lesion-then-mean") {
+        const both = list.filter((p) => p.before.values[m] !== null && p.after.values[m] !== null);
+        bRow.push(meanOrNull(both.map((p) => p.before.values[m])));
+        aRow.push(meanOrNull(both.map((p) => p.after.values[m])));
+      } else {
+        bRow.push(meanOrNull(list.map((p) => p.before.values[m])));
+        aRow.push(meanOrNull(list.map((p) => p.after.values[m])));
+      }
       if (spec.order === "lesion-then-mean") {
         const changes: (number | null)[] = list.map((p) => {
           const c = percentChange(p.before.values[m], p.after.values[m]);
@@ -91,7 +110,7 @@ export function buildDelta(spec: DeltaSpec): DeltaBuild {
       return null;
     });
   });
-  return { ok: true, result: { patients, featureNames: b.columns, values, problems, unmatched } };
+  return { ok: true, result: { patients, featureNames: b.columns, values, before, after, problems, unmatched } };
 }
 
 /** 変化率の結果を、結合（buildDataset）にそのまま渡せる特徴量の表（1 行 = 1 患者）にする。 */

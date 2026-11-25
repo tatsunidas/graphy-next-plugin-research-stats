@@ -14,6 +14,7 @@
 import type { Rng } from "../rng";
 import type { Surv } from "../survival/types";
 import { stratifiedFolds } from "../pipeline/split";
+import { meanSd } from "../stats/standardize";
 import { breslow, riskSets, subSurv, type Risk } from "./breslow";
 
 export type LassoTask = { kind: "binary"; y: number[] } | { kind: "survival"; surv: Surv };
@@ -193,8 +194,7 @@ export function fitStd(X: number[][], rows: number[], cols: number[]): Std | { e
   for (const j of cols) {
     const v = rows.map((i) => X[i][j]);
     if (v.some((x) => !Number.isFinite(x))) return { error: `欠損のある列があります（列 ${j + 1}）` };
-    const mu = v.reduce((a, b) => a + b, 0) / v.length;
-    const sd = Math.sqrt(v.reduce((a, b) => a + (b - mu) ** 2, 0) / (v.length - 1));
+    const { mean: mu, sd } = meanSd(v);
     if (sd > 0) { out.cols.push(j); out.means.push(mu); out.sds.push(sd); }
   }
   return out;
@@ -269,6 +269,8 @@ export interface LassoOptions {
   /** 交差検証の分割数。 */
   folds: number;
   rule: LambdaRule;
+  /** 分割ごとに、その訓練の行で使う列を絞る（二値の p 値による除外）。省略なら全分割で同じ列。 */
+  colsForFold?: (tr: number[], fold: number) => (cols: number[]) => number[];
 }
 
 export interface LassoCvResult {
@@ -324,7 +326,9 @@ export function lassoCv(task: LassoTask, X: number[][], rows: number[], cols: nu
   const raw: { w: number; v: (number | null)[] }[] = [];
   for (let f = 0; f < o.folds; f++) {
     const tr = rows.filter((_, p) => foldOf[p] !== f), te = rows.filter((_, p) => foldOf[p] === f);
-    const st = fitStd(X, tr, std.cols);
+    const foldCols = o.colsForFold ? o.colsForFold(tr, f)(std.cols) : std.cols;
+    if (!foldCols.length) return { error: `交差検証の分割 ${f + 1} の訓練の行で、除外の後に使える特徴量が残りませんでした` };
+    const st = fitStd(X, tr, foldCols);
     if ("error" in st) return st;
     // 分割の訓練の行で SD が 0 になった列は、その分割では使わない（係数 0 と同じ）
     const Ztr = tr.map((i) => zRow(st, X[i]));

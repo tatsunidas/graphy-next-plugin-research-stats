@@ -27,6 +27,7 @@ export const CSS = `
 .rs-root button.rs-primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .rs-root button:disabled{opacity:.5;cursor:not-allowed}
 .rs-note{color:var(--muted);font-size:12px}
+.rs-info{display:inline-flex;align-items:center;justify-content:center;margin-left:4px;width:16px;height:16px;border:1px solid var(--line);border-radius:50%;font-size:11px;color:var(--accent);cursor:help;user-select:none}
 .rs-err{background:var(--err-bg);color:var(--err);border-radius:6px;padding:6px 10px;margin:6px 0}
 .rs-warn{background:var(--warn-bg);color:var(--warn);border-radius:6px;padding:6px 10px;margin:6px 0}
 .rs-root ul{margin:4px 0;padding-left:20px}

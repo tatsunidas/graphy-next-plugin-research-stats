@@ -17,6 +17,7 @@ export interface RecordedStep {
   summary: StepOutcome["summary"];
   warnings: string[];
   errors: string[];
+  detail?: Record<string, unknown>;
 }
 
 export interface RunRecord {
@@ -90,6 +91,7 @@ export async function runSkill(
       summary: out.summary,
       warnings: out.warnings,
       errors: out.errors ?? [],
+      ...(out.detail ? { detail: out.detail } : {}),
     });
     if (failed) {
       record.status = "failed";

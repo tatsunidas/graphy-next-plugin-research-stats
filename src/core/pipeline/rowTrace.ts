@@ -2,10 +2,10 @@
  * 前処理・特徴量選択・当てはめが、どの行から推定したかの記録。行番号は X の行番号。
  * 呼び出しの場所で、推定に渡した行をそのまま記録する（実行後に leak.ts が訓練側の行かを検査する）。
  */
-export type RowStage = "qc" | "impute" | "rank" | "fit";
+export type RowStage = "qc" | "impute" | "rank" | "fit" | "pdrop" | "pdropPaired";
 
-/** 目的変数（結果ラベル・時間・イベント）を使う段階か。補完（中央値）と品質管理（分散 0・相関）は特徴量の値だけを読む。 */
-export const USES_OUTCOME: Record<RowStage, boolean> = { qc: false, impute: false, rank: true, fit: true };
+/** 目的変数（結果ラベル・時間・イベント）を使う段階か。補完（中央値）・品質管理（分散 0・相関）・対応ありの p 値による除外（前後の値の差）は特徴量の値だけを読む。対応なしの p 値による除外（pdrop）は結果ラベルの群を使う。 */
+export const USES_OUTCOME: Record<RowStage, boolean> = { qc: false, impute: false, rank: true, fit: true, pdrop: true, pdropPaired: false };
 
 export interface RowUse {
   /** "pre"（交差検証の前）・"r{反復}f{分割}"（外側の分割）・"final"（最終モデル）。内側の分割は末尾に ".i{番号}" を付ける。 */
