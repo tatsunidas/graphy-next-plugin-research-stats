@@ -86,6 +86,17 @@ add({ id: "r3", skill: R3_REPRODUCIBILITY, params: {}, features: "AB" });
 const P4B = { ...JOIN, outcomeColumn: "EGFR", outcomeKind: "binary", positiveLabel: "Mutant", lockMode: "none", outerK: 5, innerK: 3, repeats: 2, kCandidates: "1, 2, 4", missing: "impute", correlationThreshold: null };
 const P4S = { ...JOIN, ...SURV, outcomeKind: "survival", stratifySurvival: true, lockMode: "none", outerK: 5, innerK: 3, repeats: 2, kCandidates: "1, 2, 4", missing: "impute", correlationThreshold: null };
 const PRE = { dropConstant: true, correlationThreshold: 0.9 };
+// 生存だけのモデル（P4 の生存）。PRE は付けない（相関除外は P4S で null を明示している）。入れ替えは 10 回（生存の時間・イベントの組）
+for (const [tag, m] of [
+  ["enet", { model: "enet", enetAlpha: 0.5, lassoRule: "min", lassoNLambda: 50 }],
+  ["ridge", { model: "ridge", lassoRule: "min", lassoNLambda: 50 }],
+  ["coxboost", { model: "coxboost", coxIterations: "20, 50, 100", coxNu: 0.1 }],
+] as const) {
+  add({ id: `p4s_${tag}`, skill: P4_PIPELINE, params: { ...P4S, ...m }, seed: SEED });
+  add({ id: `p4s_${tag}_again`, skill: P4_PIPELINE, params: { ...P4S, ...m }, seed: SEED });
+  for (let k = 1; k <= 10; k++) add({ id: `p4s_${tag}_permS${k}`, skill: P4_PIPELINE, params: { ...P4S, ...m }, seed: SEED + k, perm: { kind: "survival", seed: 2000 + k } });
+}
+
 const PDROP = { preUnpairedOn: true, preUnpairedAlpha: 0.05, preUnpairedThr: 0.2 };
 for (const [tag, m] of [["topk", { model: "topk" }], ["lasso", { model: "lasso", lassoRule: "min", lassoNLambda: 50 }]] as const) {
   add({ id: `p4b_${tag}`, skill: P4_PIPELINE, params: { ...P4B, ...m }, seed: SEED });

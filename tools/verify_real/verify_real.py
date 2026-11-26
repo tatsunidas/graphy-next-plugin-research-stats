@@ -1164,6 +1164,29 @@ def check_p4():
             if a and b:
                 same = a["tables"] == b["tables"] and a["extra"] == b["extra"]
                 rec(S, f"p4{kind}_{tag}.a.reproducible", "PASS" if same else "FAIL", f"同じ入力・シードで 2 回: 表と出力（分割・予測・選ばれた特徴量）が完全に同じ={same}", "完全一致")
+    # 生存だけのモデル（Elastic Net・Ridge・Cox ブースティング）: 同じ検査（分割・折ごとの C-index を lifelines で再計算・予測の再現）と、入れ替え（負例）
+    for tag in ["enet", "ridge", "coxboost"]:
+        rid = f"p4s_{tag}"
+        if J(rid) is None:
+            rec(S, f"{rid}.run", "UNMET", "json が無い"); continue
+        check_p4_run(rid)
+        a, b = J(rid), J(f"{rid}_again")
+        if a and b:
+            rec(S, f"{rid}.a.reproducible", "PASS" if a["tables"] == b["tables"] and a["extra"] == b["extra"] else "FAIL", "同じ入力・シードで 2 回: 表と出力が完全に同じ", "完全一致")
+        ms = []
+        k = 1
+        while J(f"{rid}_permS{k}") is not None:
+            d_ = J(f"{rid}_permS{k}")
+            if d_["status"] == "ok":
+                ms.append(float(step(d_, "p4-cv")["summary"]["mean"]))
+            k += 1
+        if len(ms) >= 5:
+            v = np.array(ms)
+            tci = stats.t.interval(0.95, len(v) - 1, loc=v.mean(), scale=v.std(ddof=1) / math.sqrt(len(v)))
+            rec(S, f"{rid}.d.permutation_cindex", "PASS" if tci[0] <= 0.5 <= tci[1] else "FAIL",
+                f"時間・イベントの組を入れ替え {len(v)} 回: 外側の C-index の平均の平均={v.mean():.3f}（SD {v.std(ddof=1):.3f}、95% t 区間 [{tci[0]:.3f},{tci[1]:.3f}]）", "95% t 区間が 0.5 を含む（特徴量と生存が無関係なデータ）")
+        else:
+            rec(S, f"{rid}.d.permutation_cindex", "UNMET", f"入れ替えの実行 {len(ms)}/5 回分しか無い")
     # 前処理を有効にしたとき、実際に何かを除いたか（検査の対象が実在するか）
     for rid in ["p4b_topk_pre", "p4b_lasso_pre", "p4s_topk_pre"]:
         d = J(rid)

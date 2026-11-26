@@ -13,7 +13,7 @@ import { DATASET_CHECK, P4_PIPELINE, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODU
 import { R5_DEFAULTS } from "../core/r5";
 import { r5ModelCsv, r5SchoenfeldCsv, r5ScreenCsv, r5StepsCsv } from "../core/exportR5";
 import { r5Panel } from "./r5View";
-import { COMMON_MODELS, fitCount, MODELS_BY_KIND, P4_DEFAULTS, readP4Params, type ModelKind } from "../core/p4";
+import { COMMON_MODELS, fitCount, isPenalized, MODELS_BY_KIND, P4_DEFAULTS, readP4Params, type ModelKind } from "../core/p4";
 import { p4FoldsCsv, p4ImportanceCsv, p4PredictionsCsv, p4QcCsv, p4SelectionCsv } from "../core/exportP4";
 import { p4Panel } from "./p4View";
 import { R3_DEFAULTS } from "../core/r3";
@@ -39,7 +39,7 @@ const VERSION = typeof __PLUGIN_VERSION__ === "string" ? __PLUGIN_VERSION__ : "d
 /** 解析の種類の選択肢（データセットの確認は解析の種類ではなく、手前の区画）。 */
 const SKILLS: Skill[] = [R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE, R5_MODEL];
 const SKILL_LABEL: Record<string, Key> = { [R1_PROGNOSIS.id]: "skillR1", [R2_DISCRIMINATION.id]: "skillR2", [R3_REPRODUCIBILITY.id]: "skillR3", [P4_PIPELINE.id]: "skillP4", [R5_MODEL.id]: "skillR5" };
-const MODEL_LABEL: Record<ModelKind, Key> = { topk: "mTopk", lasso: "mLasso", rf: "mRf", svm: "mSvm", gbm: "mGbm" };
+const MODEL_LABEL: Record<ModelKind, Key> = { topk: "mTopk", lasso: "mLasso", enet: "mEnet", ridge: "mRidge", rf: "mRf", svm: "mSvm", gbm: "mGbm", coxboost: "mCoxBoost" };
 const LIST_LIMIT = 50;
 const UNIT_COLUMNS = ["Unit", "PlaneSource", "Plane"];
 
@@ -609,10 +609,10 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       : numberRow(id === P4_PIPELINE.id ? "rs-p4-corr" : "rs-pre-corr", t(id === P4_PIPELINE.id ? "p4Corr" : "preCorr"), "correlationThreshold", { step: 0.01, min: 0.5, max: 1, emptyIsNull: true }, "tipCorr"));
     // 標準化（自動。切り替えは無い）
     if (id === P4_PIPELINE.id) {
-      const sm: Record<string, ScaleModel> = { topk: "logistic", lasso: "lasso", rf: "rf", svm: "svm", gbm: "gbm" };
+      const sm: Record<string, ScaleModel> = { topk: "logistic", lasso: "lasso", enet: "lasso", ridge: "lasso", rf: "rf", svm: "svm", gbm: "gbm", coxboost: "coxboost" };
       const model = typeof p.model === "string" && p.model in sm ? p.model : "topk";
       const need = needsStandardization(sm[model]);
-      rows.push(h("div", { class: "rs-note", "data-testid": "rs-pre-std", "data-need": String(need) }, t(need ? "preStdNeed" : "preStdNo", { model: t(({ topk: "mTopk", lasso: "mLasso", rf: "mRf", svm: "mSvm", gbm: "mGbm" } as const)[model as "topk"]) }), tipOf("tipStd", "rs-pre-std")));
+      rows.push(h("div", { class: "rs-note", "data-testid": "rs-pre-std", "data-need": String(need) }, t(need ? "preStdNeed" : "preStdNo", { model: t(MODEL_LABEL[model as ModelKind]) }), tipOf("tipStd", "rs-pre-std")));
     }
     if (id === R5_MODEL.id) rows.push(h("div", { class: "rs-note", "data-testid": "rs-pre-std", "data-need": "true" }, t("preStdR5"), tipOf("tipStd", "rs-pre-std")));
     // 正規性・等分散性の報告（2 群）
@@ -815,8 +815,10 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       h("div", { class: "rs-row" }, h("label", {}, t("p4Model")), modelEl),
       modelNote ? h("div", { class: "rs-note", "data-testid": "rs-p4-model-reset" }, modelNote) : null,
       ...mlControls(),
-      p.model === "lasso" ? choice("rs-p4-lasso-rule", t("r5LassoRule"), "lassoRule", [["min", t("ruleMin")], ["1se", t("rule1se")]]) : null,
-      p.model === "lasso" ? numberRow("rs-p4-nlambda", t("r5NLambda"), "lassoNLambda", { step: 10, min: 2 }) : null,
+      p.model === "enet" ? numberRow("rs-p4-enet-alpha", t("p4EnetAlpha"), "enetAlpha", { step: 0.1, min: 0.01, max: 0.99, emptyIsNull: true }) : null,
+      p.model === "enet" ? h("div", { class: "rs-note", "data-testid": "rs-p4-enet-examples" }, t("p4EnetExamples")) : null,
+      isPenalized(p.model) ? choice("rs-p4-lasso-rule", t("r5LassoRule"), "lassoRule", [["min", t("ruleMin")], ["1se", t("rule1se")]]) : null,
+      isPenalized(p.model) ? numberRow("rs-p4-nlambda", t("r5NLambda"), "lassoNLambda", { step: 10, min: 2 }) : null,
       p.model !== "topk" ? null : h("div", { class: "rs-row" }, h("label", {}, t("p4K")), h("input", {
         type: "text", value: typeof p.kCandidates === "string" ? p.kCandidates : "", placeholder: "1, 2, 4", "data-testid": "rs-p4-k",
         onchange: (e: Event) => { const v = (e.target as HTMLInputElement).value.trim(); s.params = { ...s.params, kCandidates: v === "" ? null : v }; s.result = null; },
@@ -848,14 +850,15 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
   /** ランダムフォレスト・SVM・勾配ブースティングの候補（既定は置かない。scikit-learn の既定を使用例として出す）。 */
   function mlControls(): (HTMLElement | null)[] {
     const m = s.params.model;
-    if (m !== "rf" && m !== "svm" && m !== "gbm") return [];
-    const rows: (HTMLElement | null)[] = [h("div", { class: "rs-note", "data-testid": "rs-p4-ml-binary" }, t("p4MlBinaryOnly"))];
+    if (m !== "rf" && m !== "svm" && m !== "gbm" && m !== "coxboost") return [];
+    const rows: (HTMLElement | null)[] = [h("div", { class: "rs-note", "data-testid": "rs-p4-ml-binary" }, t(m === "coxboost" ? "p4MlSurvivalOnly" : "p4MlBinaryOnly"))];
+    if (m === "coxboost") rows.push(textRow("rs-p4-cox-iter", t("p4CoxIter"), "coxIterations", "100"), numberRow("rs-p4-cox-nu", t("p4CoxNu"), "coxNu", { step: 0.01, min: 0.000001, max: 1, emptyIsNull: true }));
     if (m === "rf") rows.push(numberRow("rs-p4-rf-trees", t("p4RfTrees"), "rfTrees", { step: 1, min: 1, emptyIsNull: true }), textRow("rs-p4-rf-mtry", t("p4RfMtry"), "rfMtry", "sqrt"));
     if (m === "svm") rows.push(textRow("rs-p4-svm-c", t("p4SvmC"), "svmC", "1"), textRow("rs-p4-svm-gamma", t("p4SvmGamma"), "svmGamma", "scale"));
     if (m === "gbm") rows.push(textRow("rs-p4-gbm-stages", t("p4GbmStages"), "gbmStages", "100"), textRow("rs-p4-gbm-depth", t("p4GbmDepth"), "gbmDepth", "3"),
       numberRow("rs-p4-gbm-rate", t("p4GbmRate"), "gbmRate", { step: 0.01, min: 0, max: 1, emptyIsNull: true }),
       numberRow("rs-p4-gbm-sub", t("p4GbmSub"), "gbmSubsample", { step: 0.1, min: 0, max: 1, emptyIsNull: true }));
-    rows.push(h("div", { class: "rs-note", "data-testid": "rs-p4-ml-examples" }, t(m === "rf" ? "p4RfExamples" : m === "svm" ? "p4SvmExamples" : "p4GbmExamples")));
+    rows.push(h("div", { class: "rs-note", "data-testid": "rs-p4-ml-examples" }, t(m === "rf" ? "p4RfExamples" : m === "svm" ? "p4SvmExamples" : m === "coxboost" ? "p4CoxExamples" : "p4GbmExamples")));
     const pr = readP4Params(s.params);
     const n = "error" in pr ? null : fitCount(pr);
     rows.push(h("div", { class: "rs-note", "data-testid": "rs-p4-fits" }, n === null ? t("p4FitsUnknown") : t("p4Fits", { n })));

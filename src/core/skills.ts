@@ -22,7 +22,7 @@ import {
   type ConditionData, type R3Params, type ReliabilityRow,
 } from "./r3";
 import {
-  buildCohort, checkSpec, evaluateTest, exclusionNames, featuresFingerprint, finalModel, fitCount, nestedCv, P4_DEFAULTS, qcAndMissing, readP4Params, specOf, splitCohort, subMatrix,
+  buildCohort, checkSpec, evaluateTest, exclusionNames, featuresFingerprint, finalModel, fitCount, isPenalized, nestedCv, P4_DEFAULTS, qcAndMissing, readP4Params, specOf, splitCohort, subMatrix,
   type FinalModel, type NestedCvResult, type P4Cohort, type P4Params, type QcStepResult, type SplitResult, type TestResult,
 } from "./p4";
 import { gridOf, gridText, hyperText, type NestedCvSpec, type PDropEntry } from "./pipeline/nestedCv";
@@ -615,7 +615,7 @@ export const P4_PIPELINE: Skill = {
         return {
           summary: {
             outerK: st.spec!.outerK, innerK: st.spec!.innerK, repeats: st.spec!.repeats, model: st.params.model, kCandidates: st.params.kCandidates.join(","),
-            lassoRule: st.params.lassoRule, lassoNLambda: st.params.model === "lasso" ? st.params.lassoNLambda : null,
+            lassoRule: st.params.lassoRule, lassoNLambda: isPenalized(st.params.model) ? st.params.lassoNLambda : null, penaltyAlpha: isPenalized(st.params.model) ? st.params.penaltyAlpha : null,
             grid: st.params.ml ? gridText(st.params.ml) : null, gridSize: st.params.ml ? gridOf(st.params.ml).length : null, fits: fitCount(st.params),
             mean: fmt(cv.summary.mean), min: fmt(cv.summary.min), max: fmt(cv.summary.max), valid: cv.summary.valid, total: cv.summary.total,
             ...(st.spec!.groups ? { evalUnit: "patient-mean-of-row-predictions" } : {}),

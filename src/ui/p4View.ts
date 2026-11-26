@@ -6,6 +6,7 @@ import { h } from "./dom";
 import type { Key } from "./i18n";
 import { xyChart, type XySeries } from "./xyChart";
 import { hyperText } from "../core/pipeline/nestedCv";
+import { isPenalized } from "../core/p4";
 import { assumptionView, pdropView } from "./preView";
 
 type T = (key: Key, vars?: Record<string, string | number>) => string;
@@ -58,7 +59,7 @@ export function p4Panel(st: P4State, t: T): HTMLElement {
 
   let cvView: HTMLElement | null = null;
   if (cv) {
-    const lasso = st.params.model === "lasso", ml = st.params.ml !== null;
+    const lasso = isPenalized(st.params.model), ml = st.params.ml !== null;
     const table = h("table", { class: "rs-table", "data-testid": "rs-p4-folds" },
       h("thead", {}, h("tr", {}, ...[t("thRepeat"), t("thFold"), t("thTrain"), t("thTestN"), "k", ...(lasso ? ["λ"] : []), ...(ml ? [t("thParams")] : []), metric, t("thFeatures"), t("thReason")].map((x) => h("th", {}, x)))),
       h("tbody", {}, ...cv.folds.map((f) => h("tr", { "data-testid": "rs-p4-fold" },
@@ -107,7 +108,7 @@ export function p4Panel(st: P4State, t: T): HTMLElement {
     fm.model && fm.choice.lambda !== null ? h("div", { "data-testid": "rs-p4-final-lambda" }, `λ = ${fm.choice.lambda.toPrecision(3)}`) : null,
     fm.model?.resolved ? h("div", { "data-testid": "rs-p4-final-params" }, `${t("thParams")}: ${hyperText(fm.model.resolved)}`) : null,
     fm.model?.importance ? importanceChart(fm.model.importance.map((v, a) => ({ n: st.names[fm.model!.cols[a]], v })), t) : null,
-    h("div", { class: "rs-note", "data-testid": "rs-p4-final-note" }, t(st.params.ml ? "p4FinalNoteMl" : st.params.model === "lasso" ? "p4FinalNoteLasso" : "p4FinalNote"))) : null;
+    h("div", { class: "rs-note", "data-testid": "rs-p4-final-note" }, t(st.params.ml ? "p4FinalNoteMl" : isPenalized(st.params.model) ? "p4FinalNoteLasso" : "p4FinalNote"))) : null;
 
   const testView = te ? h("div", { "data-testid": "rs-p4-test" },
     h("h3", {}, t("p4TestTitle")),

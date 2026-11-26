@@ -29,15 +29,17 @@ import { sha256Hex } from "./digest";
 export type OutcomeKind = "binary" | "survival";
 export type LockMode = "create" | "use" | "none";
 export type MissingMode = "complete" | "impute";
-export type ModelKind = "topk" | "lasso" | "rf" | "svm" | "gbm";
+export type ModelKind = "topk" | "lasso" | "enet" | "ridge" | "rf" | "svm" | "gbm" | "coxboost";
+/** 罰則つきの回帰（λ を内側の交差検証で選ぶ）: LASSO（α = 1）、Elastic Net（0 < α < 1。生存だけ）、Ridge（α = 0。生存だけ）。 */
+export const isPenalized = (m: ParamValue | undefined): boolean => m === "lasso" || m === "enet" || m === "ridge";
 /** 結果の型ごとに使えるモデル（画面の選択肢と検証で同じものを使う）。生存で使えるモデルは、ここに足す。 */
 export const MODELS_BY_KIND: Record<OutcomeKind, ModelKind[]> = {
   binary: ["topk", "lasso", "rf", "svm", "gbm"],
-  survival: ["topk", "lasso"],
+  survival: ["topk", "lasso", "enet", "ridge", "coxboost"],
 };
 /** どちらの型でも使えるモデル（結果の型をまだ選んでいないときの選択肢）。 */
 export const COMMON_MODELS: ModelKind[] = MODELS_BY_KIND.binary.filter((m) => MODELS_BY_KIND.survival.includes(m));
-const MODELS: ModelKind[] = ["topk", "lasso", "rf", "svm", "gbm"];
+const MODELS: ModelKind[] = ["topk", "lasso", "enet", "ridge", "rf", "svm", "gbm", "coxboost"];
 
 export interface P4Params {
   outcomeKind: OutcomeKind;
@@ -53,6 +55,8 @@ export interface P4Params {
   model: ModelKind;
   lassoRule: LambdaRule | null;
   lassoNLambda: number;
+  /** 罰則つきの回帰の L1 の比率（LASSO 1・Elastic Net 利用者の値・Ridge 0）。罰則つきでなければ 1。 */
+  penaltyAlpha: number;
   /** RF・SVM・GBM の候補の格子（それ以外は null）。 */
   ml: MlSpec | null;
   dropConstant: boolean;
@@ -78,6 +82,10 @@ export const P4_DEFAULTS: Record<string, ParamValue> = {
   model: "topk",
   lassoRule: null,
   lassoNLambda: 100,
+  enetAlpha: null,
+  // Cox ブースティング（生存）: 反復回数の候補は文献に決まった値が無いので既定を置かない。学習率は利用者の指定で 0.1
+  coxIterations: null,
+  coxNu: 0.1,
   // RF・SVM・GBM: 読んだ論文に設定が無いので既定は置かない（画面に scikit-learn の既定を使用例として出す）
   rfTrees: null,
   rfMtry: null,
@@ -121,13 +129,17 @@ export function parseList(v: ParamValue, what: string, words: string[] = []): (n
   return out;
 }
 
-function readMl(p: Record<string, ParamValue>, kind: "rf" | "svm" | "gbm"): MlSpec | { error: string } {
+function readMl(p: Record<string, ParamValue>, kind: "rf" | "svm" | "gbm" | "coxboost"): MlSpec | { error: string } {
   const num = (k: string, what: string): number | { error: string } => (typeof p[k] === "number" ? (p[k] as number) : { error: `${what}を入れてください（既定値は決めていません）` });
   let m: MlSpec;
   if (kind === "rf") {
     const trees = num("rfTrees", "木の数"), mtry = parseList(p.rfMtry, "mtry の候補", ["sqrt"]);
     for (const v of [trees, mtry]) if (typeof v === "object" && "error" in v) return v;
     m = { kind, trees: trees as number, mtry: mtry as (number | "sqrt")[] };
+  } else if (kind === "coxboost") {
+    const iterations = parseList(p.coxIterations, "反復回数の候補"), nu = num("coxNu", "学習率 ν");
+    for (const v of [iterations, nu]) if (typeof v === "object" && "error" in v) return v;
+    m = { kind, iterations: iterations as number[], nu: nu as number };
   } else if (kind === "svm") {
     const C = parseList(p.svmC, "C の候補"), gamma = parseList(p.svmGamma, "γ の候補", ["scale"]);
     for (const v of [C, gamma]) if ("error" in v) return v;
@@ -164,9 +176,8 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
   if (!MODELS.includes(p.model as ModelKind)) return { error: `モデルは ${MODELS.join("・")} のどれかです` };
   const model = p.model as ModelKind;
   if (!MODELS_BY_KIND[p.outcomeKind].includes(model)) return { error: `モデル「${model}」は${p.outcomeKind === "survival" ? "生存" : "二値"}の結果では使えません（使えるモデル: ${MODELS_BY_KIND[p.outcomeKind].join("・")}）` };
-  let ks: number[] = [], lassoRule: LambdaRule | null = null, lassoNLambda = 100, ml: MlSpec | null = null;
-  if (model === "rf" || model === "svm" || model === "gbm") {
-    if (p.outcomeKind !== "binary") return { error: "ランダムフォレスト・SVM・勾配ブースティングは二値の結果だけです（生存のランダムサバイバルフォレストなどは、文献での使われ方を確かめてから決めるため入れていません）" };
+  let ks: number[] = [], lassoRule: LambdaRule | null = null, lassoNLambda = 100, ml: MlSpec | null = null, penaltyAlpha = 1;
+  if (model === "rf" || model === "svm" || model === "gbm" || model === "coxboost") {
     const r = readMl(p, model);
     if ("error" in r) return r;
     ml = r;
@@ -175,6 +186,11 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
     if ("error" in r) return r;
     ks = r;
   } else {
+    if (model === "enet") {
+      const a = p.enetAlpha;
+      if (typeof a !== "number" || !(a > 0 && a < 1)) return { error: "Elastic Net の L1 の比率 α を 0 より大きく 1 より小さい値で入れてください（既定値は決めていません。1 は LASSO、0 は Ridge）" };
+      penaltyAlpha = a;
+    } else if (model === "ridge") penaltyAlpha = 0;
     if (p.lassoRule !== "min" && p.lassoRule !== "1se") return { error: "LASSO の λ の選び方（最小か 1SE）を選んでください（既定値は決めていません）" };
     lassoRule = p.lassoRule;
     const nl = p.lassoNLambda;
@@ -201,7 +217,7 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
   if (typeof bb !== "number" || !Number.isInteger(bb) || bb < 100 || bb > 100000) return { error: "テストのブートストラップ回数は 100 以上 100000 以下の整数にしてください" };
   return {
     outcomeKind: p.outcomeKind, positiveLabel: p.outcomeKind === "binary" ? (p.positiveLabel as string) : null, lockMode: p.lockMode, testFraction,
-    stratifySurvival: p.stratifySurvival === true, outerK: outerK as number, innerK: innerK as number, repeats: repeats as number, kCandidates: ks, model, lassoRule, lassoNLambda, ml,
+    stratifySurvival: p.stratifySurvival === true, outerK: outerK as number, innerK: innerK as number, repeats: repeats as number, kCandidates: ks, model, lassoRule, lassoNLambda, penaltyAlpha, ml,
     dropConstant: p.dropConstant === true, correlationThreshold: ct as number | null, missing: (p.missing as MissingMode | null) ?? null, pre,
     evaluateTest: p.evaluateTest === true, calibrationBins: cb, testBootstrapB: bb,
   };
@@ -373,7 +389,7 @@ export function specOf(c: P4Cohort, dev: number[], p: P4Params, impute: boolean)
   const strat = p.outcomeKind === "binary" || p.stratifySurvival ? strataOf(c.task) : null;
   return {
     outerK: p.outerK, innerK: p.innerK, repeats: p.repeats, kCandidates: p.kCandidates, strata: strat ? dev.map((i) => strat[i]) : null, impute,
-    model: p.ml ?? (p.model === "lasso" ? { kind: "lasso", nLambda: p.lassoNLambda, rule: p.lassoRule as LambdaRule } : { kind: "topk" }),
+    model: p.ml ?? (isPenalized(p.model) ? { kind: "lasso", nLambda: p.lassoNLambda, rule: p.lassoRule as LambdaRule, alpha: p.penaltyAlpha } : { kind: "topk" }),
     ...(c.groups ? { groups: c.groups } : {}),
   };
 }

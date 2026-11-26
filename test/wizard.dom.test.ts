@@ -351,9 +351,26 @@ describe("wizard: preprocessing section", () => {
     await choose("rs-p4-model", "rf");
     expect(q("rs-p4-model-reset")).toBeNull();
     await choose("rs-p4-kind", "survival");
-    expect(opts()).toEqual(["topk", "lasso"]); // 生存では RF は使えない
+    expect(opts()).toEqual(["topk", "lasso", "enet", "ridge", "coxboost"]); // 生存では RF・SVM・GBM は使えず、生存のモデルが出る
     expect((q("rs-p4-model") as HTMLSelectElement).value).toBe("topk");
     expect(q("rs-p4-model-reset")!.textContent).toContain("ランダムフォレスト");
+    // モデルごとの設定欄
+    expect(has("rs-p4-enet-alpha")).toBe(false);
+    await choose("rs-p4-model", "enet");
+    expect(has("rs-p4-enet-alpha")).toBe(true);
+    expect(has("rs-p4-lasso-rule")).toBe(true);
+    await choose("rs-p4-model", "ridge");
+    expect(has("rs-p4-enet-alpha")).toBe(false);
+    expect(has("rs-p4-lasso-rule")).toBe(true);
+    await choose("rs-p4-model", "coxboost");
+    expect(has("rs-p4-cox-iter")).toBe(true);
+    expect((q("rs-p4-cox-nu") as HTMLInputElement).value).toBe("0.1"); // 学習率の既定
+    expect(has("rs-p4-lasso-rule")).toBe(false);
+    // 二値に切り替えると、生存のモデルは使えなくなり topk に戻る（注記つき）
+    await choose("rs-p4-kind", "binary");
+    expect((q("rs-p4-model") as HTMLSelectElement).value).toBe("topk");
+    expect(q("rs-p4-model-reset")!.textContent).toContain("Cox ブースティング");
+    await choose("rs-p4-kind", "survival");
     // 負例: 二値に戻しても、選び直すまで勝手に RF には戻らない
     await choose("rs-p4-kind", "binary");
     expect((q("rs-p4-model") as HTMLSelectElement).value).toBe("topk");
