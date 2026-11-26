@@ -10,7 +10,7 @@ import { multiRow, opts, roles } from "./helpers/multiRow";
  * GOLDEN_OUT=<path> を付けて実行すると、今のコードの記録をそのパスへ書く（足す前のコードで 1 度だけ使った）。
  */
 const GOLDEN = new URL("./fixtures/default_records.json", import.meta.url);
-const p4 = { ...roles, outcomeKind: "binary", positiveLabel: "resp", outerK: 4, innerK: 3, repeats: 1, kCandidates: "1, 2" };
+const p4 = { ...roles, outcomeKind: "binary", positiveLabel: "resp", outerK: 4, innerK: 3, repeats: 1, kCandidates: "1, 2", correlationThreshold: null };
 
 async function records() {
   const d = multiRow(70, 5);

@@ -500,7 +500,7 @@ const fmt = (v: number | null) => (v === null ? null : Number(v.toFixed(6)));
 
 export const P4_PIPELINE: Skill = {
   id: "p4-pipeline",
-  title: { ja: "予測モデルの性能（入れ子の交差検証とテスト集合）", en: "Prediction model performance (nested cross-validation and test set)" },
+  title: { ja: "予測モデルの性能（P4: 入れ子の交差検証・テスト集合）", en: "Prediction model performance (P4: nested cross-validation and test set)" },
   question: {
     ja: "特徴量から作ったモデルは、作るのに使っていない症例でどのくらい当たるか。",
     en: "How well does a model built from the features predict cases that were not used to build it?",

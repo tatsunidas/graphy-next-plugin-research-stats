@@ -282,7 +282,7 @@ describe("R1: zero-variance and correlation removal", () => {
 });
 
 describe("P4: p-value filter through the skill (default flow and record)", () => {
-  const p4 = { ...base, outcomeKind: "binary", outerK: 4, innerK: 3, repeats: 1, kCandidates: "1, 2", lockMode: "none" };
+  const p4 = { ...base, outcomeKind: "binary", outerK: 4, innerK: 3, repeats: 1, kCandidates: "1, 2", lockMode: "none", correlationThreshold: null };
   it("filter on: recorded in the steps and the method text, row-use stays OK, and the removed features are listed per training set", async () => {
     const data = synth(100, 3);
     const on = await runSkill(P4_PIPELINE, data, { ...p4, preUnpairedOn: true, preUnpairedAlpha: 0.05, preUnpairedThr: 0.05 } as never, opts);

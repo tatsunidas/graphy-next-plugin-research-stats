@@ -18,7 +18,7 @@ function synth(n: number, seed: number) {
   return { features: [sourceOf("f.csv", feat.join("\n") + "\n", "a".repeat(64))], clinical: sourceOf("c.csv", clin.join("\n") + "\n", null) };
 }
 const base = { patientColumn: null, clinicalIdColumn: "CaseLabel", outcomeColumn: "outcome", timeColumn: "time", eventColumn: "event" };
-const p4 = { ...base, outcomeKind: "binary", positiveLabel: "resp", outerK: 5, innerK: 4, repeats: 1, kCandidates: "1, 2", lockMode: "create", testFraction: 0.25 };
+const p4 = { ...base, outcomeKind: "binary", positiveLabel: "resp", outerK: 5, innerK: 4, repeats: 1, kCandidates: "1, 2", lockMode: "create", testFraction: 0.25, correlationThreshold: null };
 const opts = { seed: 1, pluginVersion: "t", now: () => "2026-01-01T00:00:00Z" };
 
 describe("P4 records the leakage checks", () => {

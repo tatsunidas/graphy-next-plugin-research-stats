@@ -30,6 +30,13 @@ export type OutcomeKind = "binary" | "survival";
 export type LockMode = "create" | "use" | "none";
 export type MissingMode = "complete" | "impute";
 export type ModelKind = "topk" | "lasso" | "rf" | "svm" | "gbm";
+/** 結果の型ごとに使えるモデル（画面の選択肢と検証で同じものを使う）。生存で使えるモデルは、ここに足す。 */
+export const MODELS_BY_KIND: Record<OutcomeKind, ModelKind[]> = {
+  binary: ["topk", "lasso", "rf", "svm", "gbm"],
+  survival: ["topk", "lasso"],
+};
+/** どちらの型でも使えるモデル（結果の型をまだ選んでいないときの選択肢）。 */
+export const COMMON_MODELS: ModelKind[] = MODELS_BY_KIND.binary.filter((m) => MODELS_BY_KIND.survival.includes(m));
 const MODELS: ModelKind[] = ["topk", "lasso", "rf", "svm", "gbm"];
 
 export interface P4Params {
@@ -66,7 +73,7 @@ export const P4_DEFAULTS: Record<string, ParamValue> = {
   stratifySurvival: null,
   outerK: null,
   innerK: null,
-  repeats: null,
+  repeats: 1,
   kCandidates: null,
   model: "topk",
   lassoRule: null,
@@ -78,10 +85,10 @@ export const P4_DEFAULTS: Record<string, ParamValue> = {
   svmGamma: null,
   gbmStages: null,
   gbmDepth: null,
-  gbmRate: null,
+  gbmRate: 0.1,
   gbmSubsample: null,
   dropConstant: false,
-  correlationThreshold: null,
+  correlationThreshold: 0.9,
   missing: null,
   ...PRE_PAIRED_DEFAULTS,
   ...PRE_UNPAIRED_DEFAULTS,
@@ -156,6 +163,7 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
   for (const v of [outerK, innerK, repeats]) if (typeof v === "object") return v;
   if (!MODELS.includes(p.model as ModelKind)) return { error: `モデルは ${MODELS.join("・")} のどれかです` };
   const model = p.model as ModelKind;
+  if (!MODELS_BY_KIND[p.outcomeKind].includes(model)) return { error: `モデル「${model}」は${p.outcomeKind === "survival" ? "生存" : "二値"}の結果では使えません（使えるモデル: ${MODELS_BY_KIND[p.outcomeKind].join("・")}）` };
   let ks: number[] = [], lassoRule: LambdaRule | null = null, lassoNLambda = 100, ml: MlSpec | null = null;
   if (model === "rf" || model === "svm" || model === "gbm") {
     if (p.outcomeKind !== "binary") return { error: "ランダムフォレスト・SVM・勾配ブースティングは二値の結果だけです（生存のランダムサバイバルフォレストなどは、文献での使われ方を確かめてから決めるため入れていません）" };

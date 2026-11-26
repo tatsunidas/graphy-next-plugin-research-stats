@@ -35,10 +35,10 @@ export interface R5Params {
 
 /** 論文に値があるものだけ既定値を置く。相関のしきい値・ν・λ の選び方は利用者が入れる（null のままでは実行しない）。 */
 export const R5_DEFAULTS: Record<string, ParamValue> = {
-  r5Corr: null,
+  r5Corr: 0.9,
   r5Screen: "boost",
   r5BoostIterations: 100,
-  r5BoostNu: null,
+  r5BoostNu: 0.1,
   r5LassoFolds: 10,
   r5LassoRule: null,
   r5LassoNLambda: 100,
