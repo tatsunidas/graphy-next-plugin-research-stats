@@ -112,18 +112,23 @@ function etaOf(Z: number[][], c: Coef): number[] {
   return Z.map((row) => { let e = c.b0; for (let j = 0; j < row.length; j++) if (c.beta[j] !== 0) e += row[j] * c.beta[j]; return e; });
 }
 
-const penalty = (beta: number[]) => beta.reduce((a, b) => a + Math.abs(b), 0);
+/** 罰則 α‖β‖₁ + (1−α)/2·‖β‖₂²（λ はかけない）。α = 1 が LASSO、0 < α < 1 が Elastic Net、α = 0 が Ridge。切片は罰則なし。 */
+const penalty = (beta: number[], alpha = 1) => beta.reduce((a, b) => a + alpha * Math.abs(b) + ((1 - alpha) / 2) * b * b, 0);
+
+/** λ の列を作るときの α の下限（glmnet と同じ。Ridge は α = 0 だと λmax が無限大になるため 0.001 で作る）。 */
+export const ALPHA_FOR_LAMBDA_MAX = 0.001;
 
 /** 収束の判定: KKT 条件の違反（−(1/n)·対数尤度の勾配の尺度）。 */
 const KKT_TOL = 1e-10;
 
 /** 一つの λ での解。init から始める（経路では一つ前の λ の解）。 */
-export function solveLasso(lik: Lik, Z: number[][], lambda: number, init: Coef): { coef: Coef; iterations: number } | { error: string } {
+export function solveLasso(lik: Lik, Z: number[][], lambda: number, init: Coef, alpha = 1): { coef: Coef; iterations: number } | { error: string } {
   const n = lik.n, q = Z[0]?.length ?? 0;
   let cur: Coef = { b0: init.b0, beta: [...init.beta] };
   let eta = etaOf(Z, cur);
   let ev = lik.eval(eta);
-  let F = -ev.ll / n + lambda * penalty(cur.beta);
+  let F = -ev.ll / n + lambda * penalty(cur.beta, alpha);
+  const la = lambda * alpha, lr = lambda * (1 - alpha); // L1 と L2 の強さ
   for (let it = 0; it < 200; it++) {
     // −(1/n)ll の β についての勾配
     const G = new Array<number>(q).fill(0);
@@ -132,10 +137,10 @@ export function solveLasso(lik: Lik, Z: number[][], lambda: number, init: Coef):
     const G0 = lik.intercept ? -ev.g.reduce((a, b) => a + b, 0) / n : 0;
     // KKT 条件の違反（0 の係数は |G| ≤ λ、0 でない係数は G = −λ·符号、切片は G = 0）。十分小さければ最小
     let kkt = Math.abs(G0);
-    for (let j = 0; j < q; j++) kkt = Math.max(kkt, cur.beta[j] !== 0 ? Math.abs(G[j] + lambda * Math.sign(cur.beta[j])) : Math.abs(G[j]) - lambda);
+    for (let j = 0; j < q; j++) kkt = Math.max(kkt, cur.beta[j] !== 0 ? Math.abs(G[j] + la * Math.sign(cur.beta[j]) + lr * cur.beta[j]) : Math.abs(G[j]) - la);
     if (kkt < KKT_TOL) return { coef: cur, iterations: it };
     const tolK = 1e-12 * Math.max(1, lambda);
-    const W = Array.from({ length: q }, (_, j) => j).filter((j) => cur.beta[j] !== 0 || Math.abs(G[j]) > lambda + tolK);
+    const W = Array.from({ length: q }, (_, j) => j).filter((j) => cur.beta[j] !== 0 || Math.abs(G[j]) > la + tolK);
     if (lik.intercept) W.push(q);
     if (!W.length) return { coef: cur, iterations: it };
     const H = lik.hess(Z, eta, W).map((row) => row.map((v) => v / n));
@@ -151,7 +156,7 @@ export function solveLasso(lik: Lik, Z: number[][], lambda: number, init: Coef):
         const A = H[a][a];
         if (!(A > 0)) continue;
         const cc = gW[a] + Hd[a] - A * d[a];
-        const u = W[a] === q ? cW[a] - cc / A : soft(A * cW[a] - cc, lambda) / A;
+        const u = W[a] === q ? cW[a] - cc / A : soft(A * cW[a] - cc, la) / (A + lr);
         const nd = u - cW[a], delta = nd - d[a];
         if (delta !== 0) {
           for (let b = 0; b < W.length; b++) Hd[b] += H[b][a] * delta;
@@ -169,7 +174,7 @@ export function solveLasso(lik: Lik, Z: number[][], lambda: number, init: Coef):
       W.forEach((j, a) => { const v = t === 1 ? cW[a] + d[a] : cW[a] + t * d[a]; if (j === q) cand.b0 = v; else cand.beta[j] = v; });
       const e2 = etaOf(Z, cand);
       const ev2 = lik.eval(e2);
-      const F2 = -ev2.ll / n + lambda * penalty(cand.beta);
+      const F2 = -ev2.ll / n + lambda * penalty(cand.beta, alpha);
       if (Number.isFinite(F2) && F2 <= F + 1e-15 * Math.abs(F)) {
         cur = cand; eta = e2; ev = ev2; F = F2; accepted = true;
         break;
@@ -203,7 +208,7 @@ export function fitStd(X: number[][], rows: number[], cols: number[]): Std | { e
 export const zRow = (st: Std, row: number[]) => st.cols.map((j, a) => (row[j] - st.means[a]) / st.sds[a]);
 
 /** 全係数が 0 になる最小の λ（二値は切片だけのモデル、生存は β=0 での勾配から）。 */
-export function lambdaMax(lik: Lik, Z: number[][]): { lmax: number; b0: number } {
+export function lambdaMax(lik: Lik, Z: number[][], alpha = 1): { lmax: number; b0: number } {
   let b0 = 0;
   if (lik.intercept) {
     // 切片だけのロジスティック: b0 = logit(平均)
@@ -215,7 +220,7 @@ export function lambdaMax(lik: Lik, Z: number[][]): { lmax: number; b0: number }
   const q = Z[0]?.length ?? 0;
   let lmax = 0;
   for (let j = 0; j < q; j++) { let s = 0; for (let k = 0; k < Z.length; k++) s += Z[k][j] * ev.g[k]; lmax = Math.max(lmax, Math.abs(s) / lik.n); }
-  return { lmax, b0 };
+  return { lmax: lmax / Math.max(alpha, ALPHA_FOR_LAMBDA_MAX), b0 };
 }
 
 export function lambdaSeq(lmax: number, count: number, ratio: number): number[] {
@@ -241,14 +246,14 @@ export interface Path {
  * 二値の完全分離などで係数が発散するのを防ぐ）。係数が 0 でない数が、Cox ではイベント数、二値では症例数 − 1 に
  * 達したときも止める（それより多いと解が一意に決まらず、計算もほとんど進まない）。
  */
-export function lassoPath(lik: Lik, Z: number[][], lambdas: number[], b0Init: number): Path {
+export function lassoPath(lik: Lik, Z: number[][], lambdas: number[], b0Init: number, alpha = 1): Path {
   const q = Z[0]?.length ?? 0;
   const ll0 = lik.eval(new Array<number>(Z.length).fill(b0Init)).ll;
   const nullDev = 2 * (lik.llSat - ll0);
   let c: Coef = { b0: b0Init, beta: new Array<number>(q).fill(0) };
   const points: PathPoint[] = [];
   for (const l of lambdas) {
-    const r = solveLasso(lik, Z, l, c);
+    const r = solveLasso(lik, Z, l, c, alpha);
     if ("error" in r) return { points, stopped: `λ=${l.toPrecision(4)}: ${r.error}` };
     c = r.coef;
     const ll = lik.eval(etaOf(Z, c)).ll;
@@ -256,7 +261,8 @@ export function lassoPath(lik: Lik, Z: number[][], lambdas: number[], b0Init: nu
     points.push({ lambda: l, coef: { b0: c.b0, beta: [...c.beta] }, devRatio });
     if (devRatio > 0.999) return { points, stopped: "偏差の説明率が 0.999 を超えたため、これより小さい λ は解きません" };
     const nz = c.beta.filter((b) => b !== 0).length;
-    if (nz >= lik.dfLimit) return { points, stopped: `係数が 0 でない特徴量が ${nz} 個（${lik.intercept ? "症例数 − 1" : "イベント数"} ${lik.dfLimit}）に達したため、これより小さい λ は解きません（解が一意に決まらない領域）` };
+    // 係数の数の上限は LASSO（L1 だけ）の解が一意でなくなる条件。L2 を混ぜると解は一意なので、この停止は使わない
+    if (alpha === 1 && nz >= lik.dfLimit) return { points, stopped: `係数が 0 でない特徴量が ${nz} 個（${lik.intercept ? "症例数 − 1" : "イベント数"} ${lik.dfLimit}）に達したため、これより小さい λ は解きません（解が一意に決まらない領域）` };
   }
   return { points, stopped: null };
 }
@@ -273,6 +279,8 @@ export interface LassoOptions {
   colsForFold?: (tr: number[], fold: number) => (cols: number[]) => number[];
   /** rows の並びの患者 ID。あれば、交差検証の分割を患者単位にする（同じ患者の行は同じ分割）。 */
   groups?: readonly string[];
+  /** L1 の比率（1 = LASSO、0 = Ridge）。省略は 1。 */
+  alpha?: number;
 }
 
 export interface LassoCvResult {
@@ -299,6 +307,7 @@ export interface LassoCvResult {
 
 function validate(o: LassoOptions, nRows: number): string | null {
   if (!Number.isInteger(o.nLambda) || o.nLambda < 2 || o.nLambda > 1000) return "λ の点の数は 2 以上 1000 以下の整数にしてください";
+  if (o.alpha !== undefined && !(o.alpha >= 0 && o.alpha <= 1)) return "L1 の比率 α は 0 以上 1 以下にしてください";
   if (!(o.ratio > 0 && o.ratio < 1)) return "最小の λ の比は 0 より大きく 1 より小さい値にしてください";
   const units = o.groups ? new Set(o.groups).size : nRows;
   if (!Number.isInteger(o.folds) || o.folds < 2 || o.folds > units) return `交差検証の分割数は 2 以上 ${units} 以下の整数にしてください`;
@@ -318,10 +327,11 @@ export function lassoCv(task: LassoTask, X: number[][], rows: number[], cols: nu
     const pos = rows.reduce((a, i) => a + task.y[i], 0);
     if (pos === 0 || pos === rows.length) return { error: "片方の群しかありません" };
   } else if (!rows.some((i) => task.surv.event[i] === 1)) return { error: "イベントがありません" };
-  const { lmax, b0 } = lambdaMax(lik, Z);
+  const alpha = o.alpha ?? 1;
+  const { lmax, b0 } = lambdaMax(lik, Z, alpha);
   if (!(lmax > 0)) return { error: "λmax が 0 です（どの特徴量も結果と関係が見えません）" };
   const lambdas = lambdaSeq(lmax, o.nLambda, o.ratio);
-  const path = lassoPath(lik, Z, lambdas, b0);
+  const path = lassoPath(lik, Z, lambdas, b0, alpha);
   if (!path.points.length) return { error: path.stopped ?? "経路を解けませんでした" };
 
   const foldOf = foldsFor(rows.length, null, o.folds, rng, o.groups);
@@ -336,8 +346,8 @@ export function lassoCv(task: LassoTask, X: number[][], rows: number[], cols: nu
     // 分割の訓練の行で SD が 0 になった列は、その分割では使わない（係数 0 と同じ）
     const Ztr = tr.map((i) => zRow(st, X[i]));
     const lk = likOf(task, tr);
-    const b0f = task.kind === "binary" ? lambdaMax(lk, Ztr).b0 : 0;
-    const pf = lassoPath(lk, Ztr, lambdas, b0f);
+    const b0f = task.kind === "binary" ? lambdaMax(lk, Ztr, alpha).b0 : 0;
+    const pf = lassoPath(lk, Ztr, lambdas, b0f, alpha);
     const v: (number | null)[] = new Array<number | null>(L).fill(null);
     let w: number;
     if (task.kind === "binary") {
@@ -395,13 +405,13 @@ export function lassoCv(task: LassoTask, X: number[][], rows: number[], cols: nu
 }
 
 /** 固定した λ での解（照合と試験用）。 */
-export function lassoAt(task: LassoTask, X: number[][], rows: number[], cols: number[], lambda: number): { std: Std; coef: Coef; iterations: number } | { error: string } {
+export function lassoAt(task: LassoTask, X: number[][], rows: number[], cols: number[], lambda: number, alpha = 1): { std: Std; coef: Coef; iterations: number } | { error: string } {
   const std = fitStd(X, rows, cols);
   if ("error" in std) return std;
   const Z = rows.map((i) => zRow(std, X[i]));
   const lik = likOf(task, rows);
-  const b0 = task.kind === "binary" ? lambdaMax(lik, Z).b0 : 0;
-  const r = solveLasso(lik, Z, lambda, { b0, beta: new Array<number>(std.cols.length).fill(0) });
+  const b0 = task.kind === "binary" ? lambdaMax(lik, Z, alpha).b0 : 0;
+  const r = solveLasso(lik, Z, lambda, { b0, beta: new Array<number>(std.cols.length).fill(0) }, alpha);
   return "error" in r ? r : { std, coef: r.coef, iterations: r.iterations };
 }
 
