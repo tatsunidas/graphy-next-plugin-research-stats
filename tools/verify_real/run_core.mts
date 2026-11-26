@@ -86,6 +86,9 @@ add({ id: "r3", skill: R3_REPRODUCIBILITY, params: {}, features: "AB" });
 const P4B = { ...JOIN, outcomeColumn: "EGFR", outcomeKind: "binary", positiveLabel: "Mutant", lockMode: "none", outerK: 5, innerK: 3, repeats: 2, kCandidates: "1, 2, 4", missing: "impute", correlationThreshold: null };
 const P4S = { ...JOIN, ...SURV, outcomeKind: "survival", stratifySurvival: true, lockMode: "none", outerK: 5, innerK: 3, repeats: 2, kCandidates: "1, 2, 4", missing: "impute", correlationThreshold: null };
 const PRE = { dropConstant: true, correlationThreshold: 0.9 };
+// 画面と同じ既定のまま（決めるのは結果の型と陽性ラベルだけ）
+add({ id: "asis_p4s", skill: P4_PIPELINE, params: { ...JOIN, ...SURV, outcomeKind: "survival" }, seed: SEED });
+add({ id: "asis_p4b", skill: P4_PIPELINE, params: { ...JOIN, outcomeColumn: "EGFR", outcomeKind: "binary", positiveLabel: "Mutant" }, seed: SEED });
 // 生存だけのモデル（P4 の生存）。PRE は付けない（相関除外は P4S で null を明示している）。入れ替えは 10 回（生存の時間・イベントの組）
 for (const [tag, m] of [
   ["enet", { model: "enet", enetAlpha: 0.5, lassoRule: "min", lassoNLambda: 50 }],

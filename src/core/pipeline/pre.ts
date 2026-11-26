@@ -12,9 +12,9 @@ import { assumptionReport, testCounts, type AssumptionRow } from "../stats/assum
 
 /** 分割ごとに共通の設定（キーは skills の defaults と画面で共有する）。 */
 export const PRE_QC_DEFAULTS: Record<string, ParamValue> = { dropConstant: false, correlationThreshold: null };
-export const PRE_PAIRED_DEFAULTS: Record<string, ParamValue> = { prePairedOn: false, prePairedAlpha: null, prePairedThr: null };
-export const PRE_UNPAIRED_DEFAULTS: Record<string, ParamValue> = { preUnpairedOn: false, preUnpairedAlpha: null, preUnpairedThr: null };
-export const PRE_ASSUMP_DEFAULTS: Record<string, ParamValue> = { preAssumpOn: false, preAssumpAlpha: null };
+export const PRE_PAIRED_DEFAULTS: Record<string, ParamValue> = { prePairedOn: false, prePairedAlpha: 0.05, prePairedThr: 0.05 };
+export const PRE_UNPAIRED_DEFAULTS: Record<string, ParamValue> = { preUnpairedOn: false, preUnpairedAlpha: 0.05, preUnpairedThr: 0.05 };
+export const PRE_ASSUMP_DEFAULTS: Record<string, ParamValue> = { preAssumpOn: false, preAssumpAlpha: 0.05 };
 
 export interface AlphaThr {
   /** 検定の選択に使う α。 */
@@ -44,7 +44,7 @@ export interface PreCaps {
 const inOpen = (v: unknown, hi: number): v is number => typeof v === "number" && Number.isFinite(v) && v > 0 && v < hi;
 
 export function readPre(p: Record<string, ParamValue>, caps: PreCaps): PreSpec | { error: string } {
-  const need = (what: string) => ({ error: `${what}を入れてください（既定値は決めていません）` });
+  const need = (what: string) => ({ error: `${what}を入れてください` });
   const pair = (on: ParamValue, a: ParamValue, t: ParamValue, label: string): AlphaThr | null | { error: string } => {
     if (on !== true) return null;
     if (!inOpen(a, 1)) return a === null || a === undefined ? need(`${label}の α`) : { error: `${label}の α は 0 と 1 の間で指定してください` };

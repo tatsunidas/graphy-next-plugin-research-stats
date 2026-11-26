@@ -318,11 +318,14 @@ describe("P4: p-value filter through the skill (default flow and record)", () =>
     expect((b.state.p4 as P4State).spec!.pdrop).toBeUndefined();
     expect(JSON.stringify(b.record.steps)).toBe(JSON.stringify(a.record.steps));
   }, 120000);
-  it("missing alpha or threshold is an error (no default is put in)", async () => {
+  it("an emptied alpha or threshold is an error; switching the filter on uses 0.05", async () => {
     const data = synth(100, 3);
-    const r = await runSkill(P4_PIPELINE, data, { ...p4, preUnpairedOn: true } as never, opts);
+    const r = await runSkill(P4_PIPELINE, data, { ...p4, preUnpairedOn: true, preUnpairedAlpha: null } as never, opts);
     expect(r.record.status).toBe("failed");
-    expect(r.record.steps.flatMap((s) => s.errors).join()).toContain("既定値は決めていません");
+    expect(r.record.steps.flatMap((s) => s.errors).join()).toContain("αを入れてください");
+    const on = await runSkill(P4_PIPELINE, data, { ...p4, preUnpairedOn: true } as never, opts);
+    expect(on.record.status).toBe("ok");
+    expect((on.state.p4 as P4State).params.pre.unpaired).toEqual({ alpha: 0.05, threshold: 0.05 });
   }, 60000);
   it("assumption report in P4 reads the development rows only and is listed in the record", async () => {
     const data = synth(100, 3);

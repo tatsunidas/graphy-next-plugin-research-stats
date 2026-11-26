@@ -96,7 +96,7 @@ describe("P4 survival models: Elastic Net, Ridge, Cox boosting", () => {
       expect(f.innerScores).toHaveLength(2);
     }
   }, 120000);
-  it("RSF chooses (mtry, min leaf) from the grid per fold; the grid has 4 points; needs every candidate list", async () => {
+  it("RSF chooses (mtry, min leaf) from the grid per fold; the grid has 4 points; refuses an emptied candidate list", async () => {
     const st = (await go(synth(120, 7), MODELS.rsf)).state.p4 as P4State;
     for (const f of st.cv!.folds) {
       expect(f.params).not.toBeNull();
@@ -104,20 +104,20 @@ describe("P4 survival models: Elastic Net, Ridge, Cox boosting", () => {
       expect([3, 5]).toContain(Number((f.params as Record<string, number>).minLeaf));
     }
     const d = synth(60, 3);
-    expect(err(await go(d, { model: "rsf" }))).toMatch(/木の数/);
-    expect(err(await go(d, { model: "rsf", rsfTrees: 10, rsfMtry: "sqrt" }))).toMatch(/葉の最小/);
+    expect(err(await go(d, { model: "rsf", rsfTrees: null }))).toMatch(/木の数/);
+    expect(err(await go(d, { model: "rsf", rsfTrees: 10, rsfMtry: "sqrt", rsfMinLeaf: null }))).toMatch(/葉の最小/);
     expect(err(await go(d, { model: "rsf", rsfTrees: 10, rsfMtry: "sqrt", rsfMinLeaf: "3, 3" }))).toMatch(/重複/);
     // mtry が特徴量の数を超えると、どの候補も評価できず、どの折も評価不能になり、理由が折ごとに残る（0 や 0.5 にしない）
     const big = (await go(d, { model: "rsf", rsfTrees: 10, rsfMtry: "99", rsfMinLeaf: "3" })).state.p4 as P4State | undefined;
     expect(big?.cv?.folds.every((f) => f.score === null && (f.error ?? "") !== "")).toBe(true);
     expect(err(await go(d, { ...MODELS.rsf, outcomeKind: "binary", positiveLabel: "x" }))).toMatch(/二値の結果では使えません/);
   }, 120000);
-  it("settings: Elastic Net needs alpha strictly between 0 and 1; Cox boosting needs the iteration candidates; binary outcomes refuse these models", async () => {
+  it("settings: Elastic Net needs alpha strictly between 0 and 1; Cox boosting refuses emptied iteration candidates; binary outcomes refuse these models", async () => {
     const d = synth(60, 3);
-    expect(err(await go(d, { model: "enet" }))).toMatch(/L1 の比率/);
+    expect(err(await go(d, { model: "enet", enetAlpha: null }))).toMatch(/L1 の比率/);
     expect(err(await go(d, { model: "enet", enetAlpha: 1 }))).toMatch(/L1 の比率/);
     expect(err(await go(d, { model: "enet", enetAlpha: 0 }))).toMatch(/L1 の比率/);
-    expect(err(await go(d, { model: "coxboost" }))).toMatch(/反復回数/);
+    expect(err(await go(d, { model: "coxboost", coxIterations: null }))).toMatch(/反復回数/);
     expect(err(await go(d, { model: "coxboost", coxIterations: "10, 10" }))).toMatch(/重複/);
     expect(err(await go(d, { model: "coxboost", coxIterations: "10", coxNu: 0 }))).toMatch(/学習率/);
     for (const model of ["enet", "ridge", "coxboost"]) {

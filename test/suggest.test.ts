@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseCsv } from "../src/core/csv";
-import { suggestColumns } from "../src/core/suggest";
+import { suggestColumns, suggestPositive } from "../src/core/suggest";
 import { datasetCsv } from "../src/core/exportDataset";
 import { buildDataset } from "../src/core/dataset";
 import { sourceOf } from "../src/core/delta";
@@ -61,5 +61,21 @@ describe("datasetCsv", () => {
     });
     if (!r.ok) throw new Error(r.errors.join());
     expect(datasetCsv(r.dataset, "CaseLabel")).toBe("CaseLabel,time,event,f1,f2\r\nP1,5,1,1,\r\nP2,6,0,3,4\r\n");
+  });
+});
+
+describe("suggestPositive", () => {
+  const n = (label: string, k: number) => Array.from({ length: k }, () => label);
+  it("takes the positive side by name, whatever the counts", () => {
+    expect(suggestPositive([...n("Mutant", 30), ...n("Wildtype", 3)])).toBe("Mutant");
+    expect(suggestPositive([...n("0", 3), ...n("1", 30)])).toBe("1");
+    expect(suggestPositive([...n("陰性", 3), ...n("陽性", 30)])).toBe("陽性");
+    expect(suggestPositive([...n("recurrence", 20), ...n("none", 2), ...n("", 4)])).toBe("none"); // 名前で分からなければ少ない方
+    expect(suggestPositive([...n("A", 30), ...n("Negative", 3)])).toBe("A"); // 片方が陰性の語なら、もう片方
+  });
+  it("gives nothing unless there are exactly two labels", () => {
+    expect(suggestPositive(n("yes", 4))).toBeNull();
+    expect(suggestPositive(["a", "b", "c"])).toBeNull();
+    expect(suggestPositive([])).toBeNull();
   });
 });

@@ -319,7 +319,8 @@ describe("wizard: preprocessing section", () => {
   it("P4: binary outcome adds the unpaired p-value filter and the standardisation display; survival does not; the old data-testids are kept", async () => {
     await ready();
     await choose("rs-skill", "p4-pipeline");
-    expect(has("rs-pre-unpaired-on")).toBe(false); // 結果の型を選ぶまで出さない
+    // 結果の型は臨床の表から推定して入る
+    expect(["binary", "survival"]).toContain((q("rs-p4-kind") as HTMLSelectElement).value);
     await choose("rs-p4-kind", "survival");
     for (const id of ["rs-p4-const", "rs-p4-corr", "rs-pre-std"]) expect(has(id), id).toBe(true);
     for (const id of ["rs-pre-unpaired-on", "rs-pre-assump-on", "rs-pre-const", "rs-pre-corr"]) expect(has(id), id).toBe(false);
@@ -332,10 +333,12 @@ describe("wizard: preprocessing section", () => {
     expect(q("rs-pre-std")!.getAttribute("data-need")).toBe("false");
     await choose("rs-p4-model", "lasso");
     expect(q("rs-pre-std")!.getAttribute("data-need")).toBe("true");
-    // 対応なしの除外: オンにすると α・しきい値が出る（既定は空）
+    // 対応なしの除外: オンにすると α・しきい値が出る（既定 0.05）
     await toggle("rs-pre-unpaired-on", true);
-    expect((q("rs-pre-unpaired-alpha") as HTMLInputElement).value).toBe("");
-    expect((q("rs-pre-unpaired-thr") as HTMLInputElement).value).toBe("");
+    expect((q("rs-pre-unpaired-alpha") as HTMLInputElement).value).toBe("0.05");
+    expect((q("rs-pre-unpaired-thr") as HTMLInputElement).value).toBe("0.05");
+    expect(q("rs-pre-unpaired-cost")!.textContent).toContain("訓練の行の組 36 回"); // 既定の (5×1+1)×(5+1)
+    await setNumber("rs-p4-outer", ""); 
     expect(q("rs-pre-unpaired-cost")!.textContent).toContain("入れる"); // 分割数が空の間は目安を出さない
     await setNumber("rs-p4-outer", "4"); await setNumber("rs-p4-inner", "3"); await setNumber("rs-p4-repeats", "1");
     expect(q("rs-pre-unpaired-cost")!.textContent).toContain("訓練の行の組 20 回"); // (4×1+1)×(3+1)
@@ -345,7 +348,6 @@ describe("wizard: preprocessing section", () => {
     await ready();
     await choose("rs-skill", "p4-pipeline");
     const opts = () => Array.from((q("rs-p4-model") as HTMLSelectElement).options).map((o) => o.value);
-    expect(opts()).toEqual(["topk", "lasso"]); // 結果の型を選ぶまで: どちらでも使えるものだけ
     await choose("rs-p4-kind", "binary");
     expect(opts()).toEqual(["topk", "lasso", "rf", "svm", "gbm"]);
     await choose("rs-p4-model", "rf");
@@ -546,4 +548,44 @@ describe("wizard: how to treat several rows per patient", () => {
     await until(() => !!q("rs-result") || !!q("rs-errors"), "result", 60000);
     expect(q("rs-errors")).toBeNull();
   }, 70000);
+});
+
+describe("wizard: P4 runs on the defaults, and the survival stratification is in plain sight", () => {
+  async function p4() {
+    await pickFile("rs-file-features", "feat.csv", featureCsv("PatientID", ids));
+    await pickFile("rs-file-clinical", "clin.csv", clinicalCsv("PatientID", ids));
+    await until(() => !!q("rs-check-pass"), "check pass");
+    await choose("rs-skill", "p4-pipeline");
+  }
+  const val = (id: string) => (q(id) as HTMLInputElement).value;
+
+  it("survival: nothing is touched; the stratify choice is outside the detail settings and set to yes", async () => {
+    await p4();
+    expect(val("rs-p4-kind")).toBe("survival"); // 時間とイベントの列があるので生存
+    const strat = q("rs-p4-strat") as HTMLSelectElement;
+    expect(strat.value).toBe("true");
+    expect(strat.closest("details")).toBeNull();
+    expect(Array.from(strat.options).map((o) => o.value)).toEqual(["true", "false"]); // 「選んでください」は無い
+    expect([val("rs-p4-lock"), val("rs-p4-outer"), val("rs-p4-inner"), val("rs-p4-repeats"), val("rs-p4-k"), val("rs-p4-missing")]).toEqual(["none", "5", "5", "1", "1, 2, 4, 8", "impute"]);
+    (q("rs-run") as HTMLButtonElement).click();
+    await until(() => !!q("rs-result") || !!q("rs-errors"), "result", 60000);
+    expect(q("rs-errors")).toBeNull();
+    expect(q("rs-result")).toBeTruthy();
+  }, 120000);
+
+  it("binary: the positive label is filled in and the run goes through", async () => {
+    await p4();
+    await choose("rs-p4-kind", "binary");
+    expect(q("rs-p4-strat")).toBeNull(); // 二値は常に層化するので欄を出さない
+    expect(val("rs-positive")).toBe("resp"); // 20 対 20 の同数は並びが後の方
+    expect(Array.from((q("rs-positive") as HTMLSelectElement).options).map((o) => o.value)).toEqual(["nonresp", "resp"]);
+    (q("rs-run") as HTMLButtonElement).click();
+    await until(() => !!q("rs-result") || !!q("rs-errors"), "result", 60000);
+    expect(q("rs-errors")).toBeNull();
+    // 選び直した値は、描き直しても推定で上書きしない
+    await choose("rs-positive", "nonresp");
+    await choose("rs-p4-model", "lasso");
+    expect(val("rs-positive")).toBe("nonresp");
+    expect(val("rs-p4-lasso-rule")).toBe("1se");
+  }, 120000);
 });
