@@ -33,14 +33,14 @@ export interface R5Params {
   bootstrapB: number;
 }
 
-/** 論文に値があるものだけ既定値を置く。相関のしきい値・ν・λ の選び方は利用者が入れる（null のままでは実行しない）。 */
+/** 論文の値を既定にする。論文に無い相関のしきい値・ν は利用者の指定、λ の選び方は glmnet の予測の既定（1SE）。 */
 export const R5_DEFAULTS: Record<string, ParamValue> = {
   r5Corr: 0.9,
   r5Screen: "boost",
   r5BoostIterations: 100,
   r5BoostNu: 0.1,
   r5LassoFolds: 10,
-  r5LassoRule: null,
+  r5LassoRule: "1se",
   r5LassoNLambda: 100,
   r5PIn: 0.1,
   r5POut: 0.15,

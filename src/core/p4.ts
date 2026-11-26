@@ -69,39 +69,43 @@ export interface P4Params {
   testBootstrapB: number;
 }
 
+/**
+ * 必須の設定は空にしない（利用者の指定。2026-11-26）。出典・理由は README の「既定値」。
+ * 空（null）のままなのは、データで決まる結果の型と陽性ラベルだけ（画面が臨床の表から入れる）。
+ */
 export const P4_DEFAULTS: Record<string, ParamValue> = {
   outcomeKind: null,
   positiveLabel: null,
-  lockMode: null,
-  testFraction: null,
-  stratifySurvival: null,
-  outerK: null,
-  innerK: null,
+  lockMode: "none",
+  testFraction: 0.2,
+  stratifySurvival: true,
+  outerK: 5,
+  innerK: 5,
   repeats: 1,
-  kCandidates: null,
+  kCandidates: "1, 2, 4, 8",
   model: "topk",
-  lassoRule: null,
+  lassoRule: "1se",
   lassoNLambda: 100,
-  enetAlpha: null,
-  // Cox ブースティング（生存）: 反復回数の候補は文献に決まった値が無いので既定を置かない。学習率は利用者の指定で 0.1
-  coxIterations: null,
+  enetAlpha: 0.5,
+  // Cox ブースティング（生存）
+  coxIterations: "50, 100, 200",
   coxNu: 0.1,
-  // ランダムサバイバルフォレスト（生存）: 設定は文献に決まった値が無いので既定を置かない（画面に scikit-survival の既定を使用例として出す）
-  rsfTrees: null,
-  rsfMtry: null,
-  rsfMinLeaf: null,
-  // RF・SVM・GBM: 読んだ論文に設定が無いので既定は置かない（画面に scikit-learn の既定を使用例として出す）
-  rfTrees: null,
-  rfMtry: null,
-  svmC: null,
-  svmGamma: null,
-  gbmStages: null,
-  gbmDepth: null,
+  // ランダムサバイバルフォレスト（生存）: scikit-survival の既定
+  rsfTrees: 100,
+  rsfMtry: "sqrt",
+  rsfMinLeaf: "3",
+  // RF・SVM・GBM: scikit-learn の既定
+  rfTrees: 100,
+  rfMtry: "sqrt",
+  svmC: "1",
+  svmGamma: "scale",
+  gbmStages: "100",
+  gbmDepth: "3",
   gbmRate: 0.1,
-  gbmSubsample: null,
+  gbmSubsample: 1,
   dropConstant: false,
   correlationThreshold: 0.9,
-  missing: null,
+  missing: "impute",
   ...PRE_PAIRED_DEFAULTS,
   ...PRE_UNPAIRED_DEFAULTS,
   ...PRE_ASSUMP_DEFAULTS,
@@ -112,7 +116,7 @@ export const P4_DEFAULTS: Record<string, ParamValue> = {
 
 /** "1, 2, 4" → [1, 2, 4]。 */
 export function parseKList(v: ParamValue): number[] | { error: string } {
-  if (typeof v !== "string" || v.trim() === "") return { error: "特徴量の数の候補を入れてください（例: 1, 2, 4。既定値は決めていません）" };
+  if (typeof v !== "string" || v.trim() === "") return { error: "特徴量の数の候補を入れてください（例: 1, 2, 4）" };
   const xs = v.split(/[,\s、]+/).filter(Boolean).map(Number);
   if (xs.some((x) => !Number.isInteger(x) || x < 1)) return { error: "特徴量の数の候補は 1 以上の整数をカンマで区切って入れてください" };
   if (new Set(xs).size !== xs.length) return { error: "特徴量の数の候補が重複しています" };
@@ -122,7 +126,7 @@ export function parseKList(v: ParamValue): number[] | { error: string } {
 /** "0.1, 1, scale" → [0.1, 1, "scale"]。words は数のかわりに書ける語。 */
 export function parseList(v: ParamValue, what: string, words: string[] = []): (number | string)[] | { error: string } {
   if (typeof v === "number") return [v];
-  if (typeof v !== "string" || v.trim() === "") return { error: `${what}を入れてください（既定値は決めていません）` };
+  if (typeof v !== "string" || v.trim() === "") return { error: `${what}を入れてください` };
   const out: (number | string)[] = [];
   for (const t of v.split(/[,\s、]+/).filter(Boolean)) {
     if (words.includes(t)) { out.push(t); continue; }
@@ -134,7 +138,7 @@ export function parseList(v: ParamValue, what: string, words: string[] = []): (n
 }
 
 function readMl(p: Record<string, ParamValue>, kind: "rf" | "svm" | "gbm" | "coxboost" | "rsf"): MlSpec | { error: string } {
-  const num = (k: string, what: string): number | { error: string } => (typeof p[k] === "number" ? (p[k] as number) : { error: `${what}を入れてください（既定値は決めていません）` });
+  const num = (k: string, what: string): number | { error: string } => (typeof p[k] === "number" ? (p[k] as number) : { error: `${what}を入れてください` });
   let m: MlSpec;
   if (kind === "rf") {
     const trees = num("rfTrees", "木の数"), mtry = parseList(p.rfMtry, "mtry の候補", ["sqrt"]);
@@ -170,12 +174,12 @@ export function fitCount(p: P4Params): number | null {
 }
 
 export function readP4Params(p: Record<string, ParamValue>): P4Params | { error: string } {
-  const req = (what: string) => ({ error: `${what}を選んでください（既定値は決めていません）` });
+  const req = (what: string) => ({ error: `${what}を選んでください` });
   if (p.outcomeKind !== "binary" && p.outcomeKind !== "survival") return req("結果の型（二値・生存）");
   if (p.lockMode !== "create" && p.lockMode !== "use" && p.lockMode !== "none") return req("テスト集合の扱い");
   const int = (k: string, lo: number, hi: number, what: string): number | { error: string } => {
     const v = p[k];
-    if (v === null || v === undefined) return { error: `${what}を入れてください（既定値は決めていません）` };
+    if (v === null || v === undefined) return { error: `${what}を入れてください` };
     if (typeof v !== "number" || !Number.isInteger(v) || v < lo || v > hi) return { error: `${what}は ${lo} 以上 ${hi} 以下の整数にしてください` };
     return v;
   };
@@ -196,10 +200,10 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
   } else {
     if (model === "enet") {
       const a = p.enetAlpha;
-      if (typeof a !== "number" || !(a > 0 && a < 1)) return { error: "Elastic Net の L1 の比率 α を 0 より大きく 1 より小さい値で入れてください（既定値は決めていません。1 は LASSO、0 は Ridge）" };
+      if (typeof a !== "number" || !(a > 0 && a < 1)) return { error: "Elastic Net の L1 の比率 α を 0 より大きく 1 より小さい値で入れてください（1 は LASSO、0 は Ridge）" };
       penaltyAlpha = a;
     } else if (model === "ridge") penaltyAlpha = 0;
-    if (p.lassoRule !== "min" && p.lassoRule !== "1se") return { error: "LASSO の λ の選び方（最小か 1SE）を選んでください（既定値は決めていません）" };
+    if (p.lassoRule !== "min" && p.lassoRule !== "1se") return { error: "LASSO の λ の選び方（最小か 1SE）を選んでください" };
     lassoRule = p.lassoRule;
     const nl = p.lassoNLambda;
     if (typeof nl !== "number" || !Number.isInteger(nl) || nl < 2 || nl > 1000) return { error: "λ の点の数は 2 以上 1000 以下の整数にしてください" };
@@ -207,11 +211,11 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
   }
   let testFraction: number | null = null;
   if (p.lockMode === "create") {
-    if (typeof p.testFraction !== "number" || !(p.testFraction > 0 && p.testFraction < 1)) return { error: "テスト集合の割合を 0 より大きく 1 より小さい値で入れてください（既定値は決めていません）" };
+    if (typeof p.testFraction !== "number" || !(p.testFraction > 0 && p.testFraction < 1)) return { error: "テスト集合の割合を 0 より大きく 1 より小さい値で入れてください" };
     testFraction = p.testFraction;
   }
-  if (p.outcomeKind === "binary" && (typeof p.positiveLabel !== "string" || p.positiveLabel === "")) return { error: "陽性とするラベルを選んでください（既定は決めていません）" };
-  if (p.outcomeKind === "survival" && typeof p.stratifySurvival !== "boolean") return { error: "生存では、外側の分割をイベントの有無で層化するかを選んでください（文献に決まった方法が無いため既定は決めていません）" };
+  if (p.outcomeKind === "binary" && (typeof p.positiveLabel !== "string" || p.positiveLabel === "")) return { error: "陽性とするラベルを選んでください" };
+  if (p.outcomeKind === "survival" && typeof p.stratifySurvival !== "boolean") return { error: "生存では、外側の分割をイベントの有無で層化するかを選んでください" };
   const ct = p.correlationThreshold;
   if (ct !== null && (typeof ct !== "number" || !(ct > 0 && ct <= 1))) return { error: "相関のしきい値は 0 より大きく 1 以下にしてください" };
   if (p.missing !== null && p.missing !== "complete" && p.missing !== "impute") return { error: "欠損の扱いは complete か impute です" };

@@ -36,11 +36,17 @@ describe("P4 pipeline skill", () => {
   it("does not run until the settings without defaults are chosen", async () => {
     const d = synth(60, 1);
     expect(lastError(await run(d, { ...base }))).toMatch(/結果の型/);
+    // 正例: 結果の型（二値なら陽性ラベルも）を決めれば、ほかは既定のままで通る
+    const asIs = await run(d, { ...base, outcomeKind: "binary", positiveLabel: binary.positiveLabel });
+    expect(lastError(asIs)).toBe("");
+    const used = (asIs.state.p4 as P4State).params;
+    expect([used.lockMode, used.outerK, used.innerK, used.repeats, used.stratifySurvival, used.kCandidates.join()]).toEqual(["none", 5, 5, 1, true, "1,2,4,8"]);
+    expect(lastError(await run(d, { ...base, outcomeKind: "survival" }))).toBe("");
     expect(lastError(await run(d, { ...binary, lockMode: null }))).toMatch(/テスト集合の扱い/);
     expect(lastError(await run(d, { ...binary, lockMode: "none", outerK: null }))).toMatch(/外側の分割数/);
     expect(lastError(await run(d, { ...binary, lockMode: "none", kCandidates: null }))).toMatch(/候補/);
-    expect(lastError(await run(d, { ...binary, lockMode: "create" }))).toMatch(/割合/);
-    expect(lastError(await run(d, { ...binary, outcomeKind: "survival", lockMode: "none" }))).toMatch(/層化/);
+    expect(lastError(await run(d, { ...binary, lockMode: "create", testFraction: null }))).toMatch(/割合/);
+    expect(lastError(await run(d, { ...binary, outcomeKind: "survival", lockMode: "none", stratifySurvival: null }))).toMatch(/層化/);
   });
 
   it("create → save → use: the same seed gives the same split and cross-validation, evaluation counts 1, 2", async () => {
@@ -105,7 +111,7 @@ describe("P4 pipeline skill", () => {
 
   it("missing values: must choose; complete drops cases with a list; impute keeps them", async () => {
     const d = synth(90, 7, { gap: true });
-    expect(lastError(await run(d, { ...binary, lockMode: "none" }))).toMatch(/欠損が \d+ 個/);
+    expect(lastError(await run(d, { ...binary, lockMode: "none", missing: null }))).toMatch(/欠損が \d+ 個/);
     const cc = (await run(d, { ...binary, lockMode: "none", missing: "complete" })).state.p4 as P4State;
     expect(cc.qc!.droppedDev.length).toBe(13);
     expect(cc.qc!.dev.length).toBe(90 - 13);
@@ -164,7 +170,7 @@ describe("P4 pipeline skill", () => {
   it("LASSO model: needs the λ rule, not k candidates, and goes through to the test set", async () => {
     const d = synth(120, 21);
     const lasso = { ...binary, kCandidates: null, model: "lasso", lassoNLambda: 30 };
-    expect(lastError(await run(d, { ...lasso, lockMode: "none" }))).toMatch(/λ の選び方/);
+    expect(lastError(await run(d, { ...lasso, lockMode: "none", lassoRule: null }))).toMatch(/λ の選び方/);
     const c = await run(d, { ...lasso, lassoRule: "1se", lockMode: "create", testFraction: 0.25 });
     expect(c.record.status).toBe("ok");
     const st = c.state.p4 as P4State;
@@ -190,7 +196,7 @@ describe("P4 with random forest, SVM and gradient boosting", () => {
   const svm = { ...binary, kCandidates: null, model: "svm", svmC: "0.5, 2", svmGamma: "scale, 0.05" };
   const gb = { ...binary, kCandidates: null, model: "gbm", gbmStages: "20, 50", gbmDepth: "1, 2", gbmRate: 0.1, gbmSubsample: 1 };
 
-  it("needs every candidate list (no defaults), refuses survival and bad values", async () => {
+  it("refuses an emptied candidate list, survival and bad values", async () => {
     const d = synth(60, 30);
     expect(lastError(await run(d, { ...rf, rfTrees: null, lockMode: "none" }))).toMatch(/木の数/);
     expect(lastError(await run(d, { ...rf, rfMtry: null, lockMode: "none" }))).toMatch(/mtry/);

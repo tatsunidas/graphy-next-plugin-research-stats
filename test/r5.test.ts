@@ -26,12 +26,13 @@ const params = (o: Partial<R5Params> = {}): R5Params => {
 };
 
 describe("R5 parameters", () => {
-  it("needs the values the paper does not give", () => {
-    // 利用者の指定（2026-11-26）で、相関のしきい値 0.9 と学習率 ν = 0.1 は既定に入っている。空欄にすると実行できない
+  it("runs on the defaults and refuses emptied values", () => {
+    // 利用者の指定（2026-11-26）で、必須の設定は既定に入っている。空欄にすると実行できない
     expect(readR5Params({ ...R5_DEFAULTS })).not.toHaveProperty("error");
     expect(readR5Params({ ...R5_DEFAULTS, r5Corr: null })).toHaveProperty("error");
     expect(readR5Params({ ...R5_DEFAULTS, r5BoostNu: null })).toHaveProperty("error"); // ν
-    expect(readR5Params({ ...R5_DEFAULTS, r5Screen: "lasso" })).toHaveProperty("error"); // λ の選び方
+    expect(readR5Params({ ...R5_DEFAULTS, r5Screen: "lasso" })).toMatchObject({ lassoRule: "1se" });
+    expect(readR5Params({ ...R5_DEFAULTS, r5Screen: "lasso", r5LassoRule: null })).toHaveProperty("error"); // λ の選び方
     expect(readR5Params({ ...R5_DEFAULTS, r5Corr: 0.9, r5Screen: "lasso", r5LassoRule: "1se" })).not.toHaveProperty("error");
     expect(readR5Params({ ...R5_DEFAULTS, r5Corr: 0.9, r5BoostNu: 0.1, r5PIn: 0.2, r5POut: 0.15 })).toHaveProperty("error");
   });

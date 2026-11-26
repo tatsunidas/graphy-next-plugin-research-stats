@@ -25,7 +25,7 @@ import { R2_DEFAULTS } from "../core/r2";
 import { r2CurvesCsv, r2ResultsCsv, treeCsv } from "../core/exportR2";
 import { r2Panel } from "./r2View";
 import { r1Panel } from "./r1View";
-import { suggestColumns } from "../core/suggest";
+import { suggestColumns, suggestPositive } from "../core/suggest";
 import { download, h } from "./dom";
 import { assumptionsCsv, pdropCsv } from "../core/exportPre";
 import { needsStandardization, type ScaleModel } from "../core/stats/standardize";
@@ -289,7 +289,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
   /** 臨床の表を読み直したときの、目的変数の列の初期値（列名からの推測。選び直せる）。 */
   function applyRoleSuggestion() {
     const sug = suggestColumns(s.features[0]?.table ?? null, s.clinical?.table ?? null);
-    s.params = { ...s.params, timeColumn: s.clinical ? sug.time : null, eventColumn: s.clinical ? sug.event : null, outcomeColumn: s.clinical ? sug.outcome : null, covariates: [], positiveLabel: null };
+    s.params = { ...s.params, timeColumn: s.clinical ? sug.time : null, eventColumn: s.clinical ? sug.event : null, outcomeColumn: s.clinical ? sug.outcome : null, covariates: [], positiveLabel: null, outcomeKind: s.clinical ? (sug.time && sug.event ? "survival" : "binary") : null };
   }
 
   // ② データセットの確認 ---------------------------------------------------------------------
@@ -639,7 +639,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     const needs = rolesForSkill(s.skill?.id ?? null, s.params);
     const p = s.params;
     const out: HTMLElement[] = [];
-    if (s.skill?.id === P4_PIPELINE.id) out.push(choiceRow("rs-p4-kind", t("p4Kind"), "outcomeKind", [["binary", t("kBinary")], ["survival", t("kSurvival")]], { none: t("choose") }));
+    if (s.skill?.id === P4_PIPELINE.id) out.push(choiceRow("rs-p4-kind", t("p4Kind"), "outcomeKind", [["binary", t("kBinary")], ["survival", t("kSurvival")]], p.outcomeKind === null ? { none: t("choose") } : {}));
     if (!tb) return out;
     const ch = tb.header.filter((x) => x !== p.clinicalIdColumn);
     const col = (k: string) => (p[k] as string | null) && tb.header.includes(p[k] as string) ? (p[k] as string) : null;
@@ -684,20 +684,23 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
   function positiveRow(): HTMLElement {
     const p = s.params;
     const labels = outcomeValues();
+    // 選ばれていなければ、推定した陽性のラベルを入れる（画面に出るので選び直せる）
+    if (typeof p.positiveLabel !== "string" || !labels.includes(p.positiveLabel)) {
+      const guess = suggestPositive(columnValues(s.params.outcomeColumn as string | null));
+      if (guess !== p.positiveLabel) s.params = { ...s.params, positiveLabel: guess };
+    }
     const pos = h("select", { "data-testid": "rs-positive", onchange: (e: Event) => { s.params = { ...s.params, positiveLabel: (e.target as HTMLSelectElement).value || null }; s.result = null; } },
-      h("option", { value: "" }, t("positiveNone")), ...labels.map((l) => h("option", { value: l }, l)));
-    pos.value = typeof p.positiveLabel === "string" && labels.includes(p.positiveLabel) ? p.positiveLabel : "";
-    if (pos.value === "" && p.positiveLabel !== null) s.params = { ...s.params, positiveLabel: null };
+      labels.length === 2 ? null : h("option", { value: "" }, t("positiveNone")), ...labels.map((l) => h("option", { value: l }, l)));
+    pos.value = typeof s.params.positiveLabel === "string" ? s.params.positiveLabel : "";
     return h("div", { class: "rs-row" }, h("label", {}, t("positiveLabel")), pos);
   }
 
-  function choiceRow(testId: string, label: string, key: string, options: [string, string][], o: { none?: string; toValue?: (v: string) => ParamValue } = {}): HTMLElement {
+  function choiceRow(testId: string, label: string, key: string, options: [string, string][], o: { none?: string; toValue?: (v: string) => ParamValue; tip?: Key } = {}): HTMLElement {
     const el = h("select", { "data-testid": testId, onchange: (e: Event) => { const v = (e.target as HTMLSelectElement).value; s.params = { ...s.params, [key]: v === "" ? null : o.toValue ? o.toValue(v) : v }; s.result = null; render(); } },
       o.none !== undefined ? h("option", { value: "" }, o.none) : null, ...options.map(([v, l]) => h("option", { value: v }, l)));
     el.value = s.params[key] === null || s.params[key] === undefined ? "" : String(s.params[key]);
-    return h("div", { class: "rs-row" }, h("label", {}, label), el);
+    return h("div", { class: "rs-row" }, h("label", {}, label, tipOf(o.tip, testId)), el);
   }
-
 
   /** ⓘ のツールチップ（説明は title と aria-label の両方に入れる）。 */
   const tipOf = (tip: Key | undefined, testId: string) => (tip ? h("span", { class: "rs-info", title: t(tip), tabindex: "0", role: "img", "aria-label": t(tip), "data-testid": `${testId}-tip` }, "ⓘ") : null);
@@ -722,15 +725,17 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       h("input", { type: "checkbox", checked: s.params[key] === true, "data-testid": testId, onchange: (e: Event) => { s.params = { ...s.params, [key]: (e.target as HTMLInputElement).checked }; s.result = null; render(); } }));
   }
 
-  /** 結果ラベルの列にある値（陽性とするラベルの選択肢）。 */
-  function outcomeValues(): string[] {
-    const col = s.params.outcomeColumn as string | null;
+  /** 臨床の表の列の値（空欄を除く。行の数だけ）。 */
+  function columnValues(col: string | null): string[] {
     const tb = s.clinical?.table;
     if (!col || !tb) return [];
     const j = tb.header.indexOf(col);
     if (j < 0) return [];
-    return [...new Set(tb.rows.map((r) => String(r[j] ?? "").trim()).filter((x) => x !== ""))].sort();
+    return tb.rows.map((r) => String(r[j] ?? "").trim()).filter((x) => x !== "");
   }
+
+  /** 結果ラベルの列にある値（陽性とするラベルの選択肢）。 */
+  const outcomeValues = () => [...new Set(columnValues(s.params.outcomeColumn as string | null))].sort();
 
   type Controls = { main: HTMLElement[]; more: HTMLElement[] };
   const compact = (xs: (HTMLElement | null)[]) => xs.filter((x): x is HTMLElement => x !== null);
@@ -789,7 +794,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
 
   function p4Controls(): Controls {
     const p = s.params;
-    const choice = (testId: string, label: string, key: string, options: [string, string][], toValue?: (v: string) => ParamValue) => choiceRow(testId, label, key, options, { none: t("choose"), toValue });
+    const choice = (testId: string, label: string, key: string, options: [string, string][], toValue?: (v: string) => ParamValue, tip?: Key) => choiceRow(testId, label, key, options, { toValue, tip });
     // 結果の型で使えるモデルだけを出す（型を選ぶまでは、どちらでも使えるものだけ）。今のモデルが使えなくなったら topk に戻す
     const allowed: ModelKind[] = p.outcomeKind === "binary" || p.outcomeKind === "survival" ? MODELS_BY_KIND[p.outcomeKind] : COMMON_MODELS;
     let modelNote: string | null = null;
@@ -812,6 +817,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       numberRow("rs-p4-outer", t("p4Outer"), "outerK", { step: 1, min: 2, emptyIsNull: true }),
       numberRow("rs-p4-inner", t("p4Inner"), "innerK", { step: 1, min: 2, emptyIsNull: true }),
       numberRow("rs-p4-repeats", t("p4Repeats"), "repeats", { step: 1, min: 1, max: 100, emptyIsNull: true }),
+      p.outcomeKind === "survival" ? choice("rs-p4-strat", t("p4Strat"), "stratifySurvival", [["true", t("stratYes")], ["false", t("stratNo")]], (v) => v === "true", "tipStrat") : null,
       h("div", { class: "rs-row" }, h("label", {}, t("p4Model")), modelEl),
       modelNote ? h("div", { class: "rs-note", "data-testid": "rs-p4-model-reset" }, modelNote) : null,
       ...mlControls(),
@@ -827,7 +833,6 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       choice("rs-p4-missing", t("p4Missing"), "missing", [["complete", t("mComplete")], ["impute", t("mImpute")]]),
     ]);
     const more = compact([
-      p.outcomeKind === "survival" ? choice("rs-p4-strat", t("p4Strat"), "stratifySurvival", [["true", t("stratYes")], ["false", t("stratNo")]], (v) => v === "true") : null,
       p.outcomeKind === "survival" ? numberRow("rs-p4-boot", t("p4Boot"), "testBootstrapB", { step: 100, min: 100 }) : null,
       fileBlock({
         testId: "rs-file-exclusion", label: t("exclFile"), multiple: false, items: s.exclusion ? tableItems([s.exclusion]) : [],
@@ -847,7 +852,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
     }));
   }
 
-  /** ランダムフォレスト・SVM・勾配ブースティングの候補（既定は置かない。scikit-learn の既定を使用例として出す）。 */
+  /** ランダムフォレスト・SVM・勾配ブースティング・生存の木などの候補。 */
   function mlControls(): (HTMLElement | null)[] {
     const m = s.params.model;
     if (m !== "rf" && m !== "svm" && m !== "gbm" && m !== "coxboost" && m !== "rsf") return [];
@@ -868,12 +873,12 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
 
   function r5Controls(): Controls {
     const p = s.params;
-    const choice = (testId: string, label: string, key: string, options: [string, string][], allowNone: boolean) => choiceRow(testId, label, key, options, allowNone ? { none: t("choose") } : {});
+    const choice = (testId: string, label: string, key: string, options: [string, string][]) => choiceRow(testId, label, key, options);
     const boost = p.r5Screen === "boost";
     const main = compact([
-      choice("rs-r5-screen", t("r5Screen"), "r5Screen", [["boost", t("sBoost")], ["lasso", t("sLasso")]], false),
+      choice("rs-r5-screen", t("r5Screen"), "r5Screen", [["boost", t("sBoost")], ["lasso", t("sLasso")]]),
       boost ? numberRow("rs-r5-nu", t("r5Nu"), "r5BoostNu", { step: 0.01, min: 0.000001, max: 1, emptyIsNull: true }) : null,
-      boost ? null : choice("rs-r5-rule", t("r5LassoRule"), "r5LassoRule", [["min", t("ruleMin")], ["1se", t("rule1se")]], true),
+      boost ? null : choice("rs-r5-rule", t("r5LassoRule"), "r5LassoRule", [["min", t("ruleMin")], ["1se", t("rule1se")]]),
       h("div", { class: "rs-note", "data-testid": "rs-r5-examples" }, t("r5Examples")),
       Number(p.r5BootstrapB) > 0 ? h("div", { class: "rs-note", "data-testid": "rs-r5-heavy" }, t("r5Heavy")) : null,
     ]);
