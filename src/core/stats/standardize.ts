@@ -41,7 +41,7 @@ export function fitStandardizerNullable(X: (number | null)[][], rows: number[]):
   };
 }
 
-export type ScaleModel = "lasso" | "svm" | "logistic" | "knn" | "tree" | "rf" | "gbm" | "coxboost";
+export type ScaleModel = "lasso" | "svm" | "logistic" | "knn" | "tree" | "rf" | "gbm" | "coxboost" | "rsf";
 
 /** 特徴量の尺度に敏感なモデル（罰則・カーネル・距離・勾配法）は標準化が要り、分割の大小だけを見る木系は要らない。 */
 const SENSITIVE: Record<ScaleModel, boolean> = {
@@ -53,6 +53,7 @@ const SENSITIVE: Record<ScaleModel, boolean> = {
   rf: false,
   gbm: false,
   coxboost: true, // 係数の更新に、列ごとの単回帰（尺度に依存する）を使う
+  rsf: false, // 木は値の大小だけを見る
 };
 
 export function needsStandardization(model: ScaleModel): boolean {

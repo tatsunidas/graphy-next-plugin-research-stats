@@ -29,17 +29,17 @@ import { sha256Hex } from "./digest";
 export type OutcomeKind = "binary" | "survival";
 export type LockMode = "create" | "use" | "none";
 export type MissingMode = "complete" | "impute";
-export type ModelKind = "topk" | "lasso" | "enet" | "ridge" | "rf" | "svm" | "gbm" | "coxboost";
+export type ModelKind = "topk" | "lasso" | "enet" | "ridge" | "rf" | "svm" | "gbm" | "coxboost" | "rsf";
 /** 罰則つきの回帰（λ を内側の交差検証で選ぶ）: LASSO（α = 1）、Elastic Net（0 < α < 1。生存だけ）、Ridge（α = 0。生存だけ）。 */
 export const isPenalized = (m: ParamValue | undefined): boolean => m === "lasso" || m === "enet" || m === "ridge";
 /** 結果の型ごとに使えるモデル（画面の選択肢と検証で同じものを使う）。生存で使えるモデルは、ここに足す。 */
 export const MODELS_BY_KIND: Record<OutcomeKind, ModelKind[]> = {
   binary: ["topk", "lasso", "rf", "svm", "gbm"],
-  survival: ["topk", "lasso", "enet", "ridge", "coxboost"],
+  survival: ["topk", "lasso", "enet", "ridge", "coxboost", "rsf"],
 };
 /** どちらの型でも使えるモデル（結果の型をまだ選んでいないときの選択肢）。 */
 export const COMMON_MODELS: ModelKind[] = MODELS_BY_KIND.binary.filter((m) => MODELS_BY_KIND.survival.includes(m));
-const MODELS: ModelKind[] = ["topk", "lasso", "enet", "ridge", "rf", "svm", "gbm", "coxboost"];
+const MODELS: ModelKind[] = ["topk", "lasso", "enet", "ridge", "rf", "svm", "gbm", "coxboost", "rsf"];
 
 export interface P4Params {
   outcomeKind: OutcomeKind;
@@ -86,6 +86,10 @@ export const P4_DEFAULTS: Record<string, ParamValue> = {
   // Cox ブースティング（生存）: 反復回数の候補は文献に決まった値が無いので既定を置かない。学習率は利用者の指定で 0.1
   coxIterations: null,
   coxNu: 0.1,
+  // ランダムサバイバルフォレスト（生存）: 設定は文献に決まった値が無いので既定を置かない（画面に scikit-survival の既定を使用例として出す）
+  rsfTrees: null,
+  rsfMtry: null,
+  rsfMinLeaf: null,
   // RF・SVM・GBM: 読んだ論文に設定が無いので既定は置かない（画面に scikit-learn の既定を使用例として出す）
   rfTrees: null,
   rfMtry: null,
@@ -129,13 +133,17 @@ export function parseList(v: ParamValue, what: string, words: string[] = []): (n
   return out;
 }
 
-function readMl(p: Record<string, ParamValue>, kind: "rf" | "svm" | "gbm" | "coxboost"): MlSpec | { error: string } {
+function readMl(p: Record<string, ParamValue>, kind: "rf" | "svm" | "gbm" | "coxboost" | "rsf"): MlSpec | { error: string } {
   const num = (k: string, what: string): number | { error: string } => (typeof p[k] === "number" ? (p[k] as number) : { error: `${what}を入れてください（既定値は決めていません）` });
   let m: MlSpec;
   if (kind === "rf") {
     const trees = num("rfTrees", "木の数"), mtry = parseList(p.rfMtry, "mtry の候補", ["sqrt"]);
     for (const v of [trees, mtry]) if (typeof v === "object" && "error" in v) return v;
     m = { kind, trees: trees as number, mtry: mtry as (number | "sqrt")[] };
+  } else if (kind === "rsf") {
+    const trees = num("rsfTrees", "木の数"), mtry = parseList(p.rsfMtry, "mtry の候補", ["sqrt"]), leaf = parseList(p.rsfMinLeaf, "葉の最小の行数の候補");
+    for (const v of [trees, mtry, leaf]) if (typeof v === "object" && "error" in v) return v;
+    m = { kind, trees: trees as number, mtry: mtry as (number | "sqrt")[], minLeaf: leaf as number[] };
   } else if (kind === "coxboost") {
     const iterations = parseList(p.coxIterations, "反復回数の候補"), nu = num("coxNu", "学習率 ν");
     for (const v of [iterations, nu]) if (typeof v === "object" && "error" in v) return v;
@@ -177,7 +185,7 @@ export function readP4Params(p: Record<string, ParamValue>): P4Params | { error:
   const model = p.model as ModelKind;
   if (!MODELS_BY_KIND[p.outcomeKind].includes(model)) return { error: `モデル「${model}」は${p.outcomeKind === "survival" ? "生存" : "二値"}の結果では使えません（使えるモデル: ${MODELS_BY_KIND[p.outcomeKind].join("・")}）` };
   let ks: number[] = [], lassoRule: LambdaRule | null = null, lassoNLambda = 100, ml: MlSpec | null = null, penaltyAlpha = 1;
-  if (model === "rf" || model === "svm" || model === "gbm" || model === "coxboost") {
+  if (model === "rf" || model === "svm" || model === "gbm" || model === "coxboost" || model === "rsf") {
     const r = readMl(p, model);
     if ("error" in r) return r;
     ml = r;

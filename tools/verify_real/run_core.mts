@@ -91,6 +91,7 @@ for (const [tag, m] of [
   ["enet", { model: "enet", enetAlpha: 0.5, lassoRule: "min", lassoNLambda: 50 }],
   ["ridge", { model: "ridge", lassoRule: "min", lassoNLambda: 50 }],
   ["coxboost", { model: "coxboost", coxIterations: "20, 50, 100", coxNu: 0.1 }],
+  ["rsf", { model: "rsf", rsfTrees: 100, rsfMtry: "sqrt, 20", rsfMinLeaf: "3, 5" }],
 ] as const) {
   add({ id: `p4s_${tag}`, skill: P4_PIPELINE, params: { ...P4S, ...m }, seed: SEED });
   add({ id: `p4s_${tag}_again`, skill: P4_PIPELINE, params: { ...P4S, ...m }, seed: SEED });

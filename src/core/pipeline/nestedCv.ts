@@ -94,6 +94,7 @@ import { lassoCv, type LambdaRule } from "../model/lasso";
 import { randomForest, sqrtMtry } from "../model/randomForest";
 import { gbm } from "../model/gbm";
 import { coxBoost } from "../model/coxBoost";
+import { survivalForest } from "../model/survivalForest";
 import { scaleGamma, svmFit } from "../model/svm";
 
 /**
@@ -108,19 +109,22 @@ export type ModelSpec =
   | { kind: "svm"; C: number[]; gamma: (number | "scale")[] }
   | { kind: "gbm"; stages: number[]; depth: number[]; learningRate: number; subsample: number }
   /** 生存だけ: Cox ブースティング（成分ごと・線形の基底）。反復回数の候補を内側の交差検証の C-index で選ぶ。 */
-  | { kind: "coxboost"; iterations: number[]; nu: number };
+  | { kind: "coxboost"; iterations: number[]; nu: number }
+  /** 生存だけ: ランダムサバイバルフォレスト。mtry と葉の最小の行数の格子を、内側の交差検証の C-index で選ぶ。 */
+  | { kind: "rsf"; trees: number; mtry: (number | "sqrt")[]; minLeaf: number[] };
 
-export type MlSpec = Extract<ModelSpec, { kind: "rf" | "svm" | "gbm" | "coxboost" }>;
+export type MlSpec = Extract<ModelSpec, { kind: "rf" | "svm" | "gbm" | "coxboost" | "rsf" }>;
 /** 格子の 1 点。値は利用者が入れたままの形（"sqrt"・"scale" を含む）。 */
 export type Hyper = Record<string, number | string>;
 
-export const isMl = (m: ModelSpec | undefined): m is MlSpec => m?.kind === "rf" || m?.kind === "svm" || m?.kind === "gbm" || m?.kind === "coxboost";
+export const isMl = (m: ModelSpec | undefined): m is MlSpec => m?.kind === "rf" || m?.kind === "svm" || m?.kind === "gbm" || m?.kind === "coxboost" || m?.kind === "rsf";
 
 /** 格子（入れた順。前の候補ほど外側の並び）。 */
 export function gridOf(m: MlSpec): Hyper[] {
   if (m.kind === "rf") return m.mtry.map((v) => ({ trees: m.trees, mtry: v }));
   if (m.kind === "svm") return m.C.flatMap((C) => m.gamma.map((gamma) => ({ C, gamma })));
   if (m.kind === "coxboost") return m.iterations.map((iterations) => ({ iterations, nu: m.nu }));
+  if (m.kind === "rsf") return m.mtry.flatMap((mtry) => m.minLeaf.map((minLeaf) => ({ trees: m.trees, mtry, minLeaf })));
   return m.stages.flatMap((stages) => m.depth.map((depth) => ({ stages, depth, learningRate: m.learningRate, subsample: m.subsample })));
 }
 
@@ -129,6 +133,7 @@ export function gridText(m: MlSpec): string {
   if (m.kind === "rf") return `trees=${m.trees} mtry=[${m.mtry.join(",")}]`;
   if (m.kind === "svm") return `C=[${m.C.join(",")}] gamma=[${m.gamma.join(",")}]`;
   if (m.kind === "coxboost") return `iterations=[${m.iterations.join(",")}] nu=${m.nu}`;
+  if (m.kind === "rsf") return `trees=${m.trees} mtry=[${m.mtry.join(",")}] minLeaf=[${m.minLeaf.join(",")}]`;
   return `stages=[${m.stages.join(",")}] depth=[${m.depth.join(",")}] learningRate=${m.learningRate} subsample=${m.subsample}`;
 }
 
@@ -349,6 +354,7 @@ export function fitLassoOn(X: (number | null)[][], task: Task, T: number[], spec
 export function fitMl(imp: Imputed, task: Task, train: number[], h: Hyper, kind: MlSpec["kind"], rng: Rng, trace?: RowTrace): Trained | { error: string } {
   trace?.note("fit", train);
   if (kind === "coxboost") return fitCoxBoost(imp, task, train, h);
+  if (kind === "rsf") return fitRsf(imp, task, train, h, rng);
   if (task.kind !== "binary") return { error: "ランダムフォレスト・SVM・勾配ブースティングは二値の結果だけです" };
   const cols = imp.usable.map((u, j) => (u ? j : -1)).filter((j) => j >= 0);
   if (!cols.length) return { error: "使える特徴量がありません" };
@@ -403,6 +409,27 @@ function fitCoxBoost(imp: Imputed, task: Task, train: number[], h: Hyper): Train
     cols: nz.map((x) => x.c), medians: imp.medians, means: nz.map((x) => b.std.means[x.a]), sds: nz.map((x) => b.std.sds[x.a]),
     importance: nz.map((x) => b.importance[x.a]), resolved: { iterations: h.iterations, nu: h.nu }, predict,
   };
+}
+
+/** ランダムサバイバルフォレスト（生存だけ）。使える特徴量をすべて使い、リスク（累積ハザードのイベント時刻での和の、木の平均）を返す。 */
+function fitRsf(imp: Imputed, task: Task, train: number[], h: Hyper, rng: Rng): Trained | { error: string } {
+  if (task.kind !== "survival") return { error: "ランダムサバイバルフォレストは生存の結果だけです" };
+  const cols = imp.usable.map((u, j) => (u ? j : -1)).filter((j) => j >= 0);
+  if (!cols.length) return { error: "使える特徴量がありません" };
+  if (!train.some((i) => task.surv.event[i] === 1)) return { error: "訓練の行にイベントがありません" };
+  const mtry = h.mtry === "sqrt" ? sqrtMtry(cols.length) : (h.mtry as number);
+  if (mtry > cols.length) return { error: `mtry（${mtry}）が使える特徴量の数（${cols.length}）を超えています` };
+  try {
+    const f = survivalForest(task.surv, imp.X, train, cols, { trees: h.trees as number, mtry, minLeaf: h.minLeaf as number }, rng);
+    const okRow = (i: number) => cols.every((j) => Number.isFinite(imp.X[i][j]));
+    return {
+      cols, medians: imp.medians, means: cols.map(() => NaN), sds: cols.map(() => NaN), resolved: { trees: h.trees, mtry, minLeaf: h.minLeaf },
+      predict: (i) => (okRow(i) ? f.predict(imp.X[i]) : null),
+    };
+  } catch (e) {
+    if (e instanceof RangeError) return { error: e.message };
+    throw e;
+  }
 }
 
 /** 訓練の行 T の中で、内側の交差検証（層化しない）により格子の点を選ぶ。基準は内側の予測を束ねた AUC、同じ値なら格子の前の点。 */
@@ -481,6 +508,11 @@ export function validateMl(m: MlSpec): string | null {
     if (!posInt(m.trees) || m.trees > 100000) return "木の数は 1 以上 100000 以下の整数にしてください";
     if (!m.mtry.length || m.mtry.some((v) => v !== "sqrt" && !posInt(v))) return "mtry の候補は 1 以上の整数か sqrt で 1 つ以上入れてください";
     if (dup(m.mtry)) return "mtry の候補が重複しています";
+  } else if (m.kind === "rsf") {
+    if (!posInt(m.trees) || m.trees > 100000) return "木の数は 1 以上 100000 以下の整数にしてください";
+    if (!m.mtry.length || m.mtry.some((v) => v !== "sqrt" && !posInt(v))) return "mtry の候補は 1 以上の整数か sqrt で 1 つ以上入れてください";
+    if (!m.minLeaf.length || m.minLeaf.some((v) => !posInt(v))) return "葉の最小の行数の候補は 1 以上の整数で 1 つ以上入れてください";
+    if (dup(m.mtry) || dup(m.minLeaf)) return "mtry か葉の最小の行数の候補が重複しています";
   } else if (m.kind === "coxboost") {
     if (!m.iterations.length || m.iterations.some((v) => !posInt(v) || v > 100000)) return "反復回数の候補は 1 以上の整数で 1 つ以上入れてください";
     if (dup(m.iterations)) return "反復回数の候補が重複しています";

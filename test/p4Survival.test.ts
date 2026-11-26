@@ -25,6 +25,7 @@ const MODELS: Record<string, Record<string, unknown>> = {
   enet: { model: "enet", enetAlpha: 0.5 },
   ridge: { model: "ridge" },
   coxboost: { model: "coxboost", coxIterations: "20, 60", coxNu: 0.1 },
+  rsf: { model: "rsf", rsfTrees: 25, rsfMtry: "sqrt, 3", rsfMinLeaf: "3, 5" },
 };
 const opts = { seed: 1, pluginVersion: "t", now: () => "2026-11-26T00:00:00Z" };
 const go = (d: ReturnType<typeof synth>, params: Record<string, unknown>) => runSkill(P4_PIPELINE, d, { ...base, ...params } as never, opts);
@@ -64,9 +65,9 @@ describe("P4 survival models: Elastic Net, Ridge, Cox boosting", () => {
       // 最終モデルが作れ、方法の文にモデルの説明が入る
       expect(st.final!.error).toBeNull();
       const ja = methodText(record, P4_PIPELINE, "ja"), en = methodText(record, P4_PIPELINE, "en");
-      const key = { lasso: "LASSO-Cox", enet: "Elastic Net-Cox", ridge: "Ridge-Cox", coxboost: "Cox ブースティング" }[name]!;
+      const key = { lasso: "LASSO-Cox", enet: "Elastic Net-Cox", ridge: "Ridge-Cox", coxboost: "Cox ブースティング", rsf: "ランダムサバイバルフォレスト" }[name]!;
       expect(ja).toContain(key);
-      expect(en).toContain({ lasso: "LASSO-Cox", enet: "elastic-net", ridge: "ridge-penalised", coxboost: "Cox boosting" }[name]!);
+      expect(en).toContain({ lasso: "LASSO-Cox", enet: "elastic-net", ridge: "ridge-penalised", coxboost: "Cox boosting", rsf: "random survival forest" }[name]!);
     }, 120000);
     it(`${name}: negative control — with no relation between features and survival the mean C-index is near 0.5`, async () => {
       const cs: number[] = [];
@@ -94,6 +95,22 @@ describe("P4 survival models: Elastic Net, Ridge, Cox boosting", () => {
       expect([20, 60]).toContain(Number((f.params as Record<string, number>).iterations));
       expect(f.innerScores).toHaveLength(2);
     }
+  }, 120000);
+  it("RSF chooses (mtry, min leaf) from the grid per fold; the grid has 4 points; needs every candidate list", async () => {
+    const st = (await go(synth(120, 7), MODELS.rsf)).state.p4 as P4State;
+    for (const f of st.cv!.folds) {
+      expect(f.params).not.toBeNull();
+      expect(f.innerScores).toHaveLength(4);
+      expect([3, 5]).toContain(Number((f.params as Record<string, number>).minLeaf));
+    }
+    const d = synth(60, 3);
+    expect(err(await go(d, { model: "rsf" }))).toMatch(/木の数/);
+    expect(err(await go(d, { model: "rsf", rsfTrees: 10, rsfMtry: "sqrt" }))).toMatch(/葉の最小/);
+    expect(err(await go(d, { model: "rsf", rsfTrees: 10, rsfMtry: "sqrt", rsfMinLeaf: "3, 3" }))).toMatch(/重複/);
+    // mtry が特徴量の数を超えると、どの候補も評価できず、どの折も評価不能になり、理由が折ごとに残る（0 や 0.5 にしない）
+    const big = (await go(d, { model: "rsf", rsfTrees: 10, rsfMtry: "99", rsfMinLeaf: "3" })).state.p4 as P4State | undefined;
+    expect(big?.cv?.folds.every((f) => f.score === null && (f.error ?? "") !== "")).toBe(true);
+    expect(err(await go(d, { ...MODELS.rsf, outcomeKind: "binary", positiveLabel: "x" }))).toMatch(/二値の結果では使えません/);
   }, 120000);
   it("settings: Elastic Net needs alpha strictly between 0 and 1; Cox boosting needs the iteration candidates; binary outcomes refuse these models", async () => {
     const d = synth(60, 3);
