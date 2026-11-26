@@ -199,7 +199,7 @@ describe("P4 with random forest, SVM and gradient boosting", () => {
     expect(lastError(await run(d, { ...svm, svmC: "1, abc", lockMode: "none" }))).toMatch(/読めない/);
     expect(lastError(await run(d, { ...svm, svmC: "1, 1", lockMode: "none" }))).toMatch(/重複/);
     expect(lastError(await run(d, { ...gb, gbmSubsample: 1.5, lockMode: "none" }))).toMatch(/subsample/);
-    expect(lastError(await run(d, { ...rf, outcomeKind: "survival", stratifySurvival: true, lockMode: "none" }))).toMatch(/二値の結果だけ/);
+    expect(lastError(await run(d, { ...rf, outcomeKind: "survival", stratifySurvival: true, lockMode: "none" }))).toMatch(/生存の結果では使えません/);
   });
 
   for (const [name, params] of [["rf", rf], ["svm", svm], ["gbm", gb]] as const) {

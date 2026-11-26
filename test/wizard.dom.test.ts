@@ -341,6 +341,37 @@ describe("wizard: preprocessing section", () => {
     expect(q("rs-pre-unpaired-cost")!.textContent).toContain("訓練の行の組 20 回"); // (4×1+1)×(3+1)
   });
 
+  it("P4: the model list follows the outcome type (common models first), and a model that no longer fits is reset with a note", async () => {
+    await ready();
+    await choose("rs-skill", "p4-pipeline");
+    const opts = () => Array.from((q("rs-p4-model") as HTMLSelectElement).options).map((o) => o.value);
+    expect(opts()).toEqual(["topk", "lasso"]); // 結果の型を選ぶまで: どちらでも使えるものだけ
+    await choose("rs-p4-kind", "binary");
+    expect(opts()).toEqual(["topk", "lasso", "rf", "svm", "gbm"]);
+    await choose("rs-p4-model", "rf");
+    expect(q("rs-p4-model-reset")).toBeNull();
+    await choose("rs-p4-kind", "survival");
+    expect(opts()).toEqual(["topk", "lasso"]); // 生存では RF は使えない
+    expect((q("rs-p4-model") as HTMLSelectElement).value).toBe("topk");
+    expect(q("rs-p4-model-reset")!.textContent).toContain("ランダムフォレスト");
+    // 負例: 二値に戻しても、選び直すまで勝手に RF には戻らない
+    await choose("rs-p4-kind", "binary");
+    expect((q("rs-p4-model") as HTMLSelectElement).value).toBe("topk");
+  });
+
+  it("the correlation threshold default follows the skill: 0.9 for P4, blank for R1 (the key is shared between skills)", async () => {
+    await ready();
+    await choose("rs-skill", "p4-pipeline");
+    await choose("rs-p4-kind", "survival");
+    expect((q("rs-p4-corr") as HTMLInputElement).value).toBe("0.9");
+    await choose("rs-skill", "r1-prognosis");
+    await until(() => !has("rs-p4-corr"), "R1 shown");
+    expect((q("rs-pre-corr") as HTMLInputElement).value).toBe(""); // 負例: P4 の 0.9 が R1 の前処理に混ざって、相関除外が勝手に有効にならない
+    await choose("rs-skill", "p4-pipeline");
+    await choose("rs-p4-kind", "survival");
+    expect((q("rs-p4-corr") as HTMLInputElement).value).toBe("0.9"); // P4 に戻すと既定に戻る
+  });
+
   it("R5: the correlation threshold moved here with its data-testid; zero variance is fixed; standardisation is shown; no p-value filter without before/after tables", async () => {
     await ready();
     await choose("rs-skill", "r5-model");

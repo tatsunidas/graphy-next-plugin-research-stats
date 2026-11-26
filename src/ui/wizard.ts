@@ -13,7 +13,7 @@ import { DATASET_CHECK, P4_PIPELINE, R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODU
 import { R5_DEFAULTS } from "../core/r5";
 import { r5ModelCsv, r5SchoenfeldCsv, r5ScreenCsv, r5StepsCsv } from "../core/exportR5";
 import { r5Panel } from "./r5View";
-import { fitCount, P4_DEFAULTS, readP4Params } from "../core/p4";
+import { COMMON_MODELS, fitCount, MODELS_BY_KIND, P4_DEFAULTS, readP4Params, type ModelKind } from "../core/p4";
 import { p4FoldsCsv, p4ImportanceCsv, p4PredictionsCsv, p4QcCsv, p4SelectionCsv } from "../core/exportP4";
 import { p4Panel } from "./p4View";
 import { R3_DEFAULTS } from "../core/r3";
@@ -39,6 +39,7 @@ const VERSION = typeof __PLUGIN_VERSION__ === "string" ? __PLUGIN_VERSION__ : "d
 /** 解析の種類の選択肢（データセットの確認は解析の種類ではなく、手前の区画）。 */
 const SKILLS: Skill[] = [R1_PROGNOSIS, R2_DISCRIMINATION, R3_REPRODUCIBILITY, P4_PIPELINE, R5_MODEL];
 const SKILL_LABEL: Record<string, Key> = { [R1_PROGNOSIS.id]: "skillR1", [R2_DISCRIMINATION.id]: "skillR2", [R3_REPRODUCIBILITY.id]: "skillR3", [P4_PIPELINE.id]: "skillP4", [R5_MODEL.id]: "skillR5" };
+const MODEL_LABEL: Record<ModelKind, Key> = { topk: "mTopk", lasso: "mLasso", rf: "mRf", svm: "mSvm", gbm: "mGbm" };
 const LIST_LIMIT = 50;
 const UNIT_COLUMNS = ["Unit", "PlaneSource", "Plane"];
 
@@ -554,6 +555,8 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       s.skill = SKILLS.find((r) => r.id === id) ?? null;
       s.result = null;
       s.selectedFeature = null;
+      // 相関のしきい値は R1・R2・P4 が同じ設定を共有する。既定は Skill ごとに違う（P4 は 0.9、ほかは未設定）ので、切り替えたら新しい Skill の既定に合わせる
+      if (s.skill && "correlationThreshold" in s.skill.defaults) s.params = { ...s.params, correlationThreshold: s.skill.defaults.correlationThreshold };
       // 「行のまま」は P4 だけ。ほかの解析に切り替えたら平均に戻す
       const dropAsis = s.params.rowsMode === "asis" && s.skill?.id !== P4_PIPELINE.id;
       if (dropAsis) setRowsMode("average");
@@ -787,10 +790,16 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
   function p4Controls(): Controls {
     const p = s.params;
     const choice = (testId: string, label: string, key: string, options: [string, string][], toValue?: (v: string) => ParamValue) => choiceRow(testId, label, key, options, { none: t("choose"), toValue });
+    // 結果の型で使えるモデルだけを出す（型を選ぶまでは、どちらでも使えるものだけ）。今のモデルが使えなくなったら topk に戻す
+    const allowed: ModelKind[] = p.outcomeKind === "binary" || p.outcomeKind === "survival" ? MODELS_BY_KIND[p.outcomeKind] : COMMON_MODELS;
+    let modelNote: string | null = null;
+    if (typeof p.model === "string" && !allowed.includes(p.model as ModelKind)) {
+      modelNote = t("p4ModelReset", { m: t(MODEL_LABEL[p.model as ModelKind] ?? "mTopk") });
+      s.params = { ...s.params, model: "topk" };
+    }
     const modelEl = h("select", { "data-testid": "rs-p4-model", onchange: (e: Event) => { s.params = { ...s.params, model: (e.target as HTMLSelectElement).value }; s.result = null; render(); } },
-      h("option", { value: "topk" }, t("mTopk")), h("option", { value: "lasso" }, t("mLasso")),
-      h("option", { value: "rf" }, t("mRf")), h("option", { value: "svm" }, t("mSvm")), h("option", { value: "gbm" }, t("mGbm")));
-    modelEl.value = typeof p.model === "string" && ["lasso", "rf", "svm", "gbm"].includes(p.model) ? p.model : "topk";
+      ...allowed.map((m) => h("option", { value: m }, t(MODEL_LABEL[m]))));
+    modelEl.value = typeof s.params.model === "string" && allowed.includes(s.params.model as ModelKind) ? s.params.model : "topk";
     const main = compact([
       choice("rs-p4-lock", t("p4Lock"), "lockMode", [["create", t("lockCreate")], ["use", t("lockUse")], ["none", t("lockNone")]]),
       p.lockMode === "create" ? numberRow("rs-p4-frac", t("p4Frac"), "testFraction", { step: 0.05, min: 0.05, max: 0.95, emptyIsNull: true }) : null,
@@ -804,6 +813,7 @@ export function mountWizard(root: HTMLElement, locale: Locale): void {
       numberRow("rs-p4-inner", t("p4Inner"), "innerK", { step: 1, min: 2, emptyIsNull: true }),
       numberRow("rs-p4-repeats", t("p4Repeats"), "repeats", { step: 1, min: 1, max: 100, emptyIsNull: true }),
       h("div", { class: "rs-row" }, h("label", {}, t("p4Model")), modelEl),
+      modelNote ? h("div", { class: "rs-note", "data-testid": "rs-p4-model-reset" }, modelNote) : null,
       ...mlControls(),
       p.model === "lasso" ? choice("rs-p4-lasso-rule", t("r5LassoRule"), "lassoRule", [["min", t("ruleMin")], ["1se", t("rule1se")]]) : null,
       p.model === "lasso" ? numberRow("rs-p4-nlambda", t("r5NLambda"), "lassoNLambda", { step: 10, min: 2 }) : null,

@@ -83,8 +83,8 @@ add({ id: "r2_acc_none", skill: R2_DISCRIMINATION, params: { ...R2, criterion: "
 add({ id: "r3", skill: R3_REPRODUCIBILITY, params: {}, features: "AB" });
 
 // P4
-const P4B = { ...JOIN, outcomeColumn: "EGFR", outcomeKind: "binary", positiveLabel: "Mutant", lockMode: "none", outerK: 5, innerK: 3, repeats: 2, kCandidates: "1, 2, 4", missing: "impute" };
-const P4S = { ...JOIN, ...SURV, outcomeKind: "survival", stratifySurvival: true, lockMode: "none", outerK: 5, innerK: 3, repeats: 2, kCandidates: "1, 2, 4", missing: "impute" };
+const P4B = { ...JOIN, outcomeColumn: "EGFR", outcomeKind: "binary", positiveLabel: "Mutant", lockMode: "none", outerK: 5, innerK: 3, repeats: 2, kCandidates: "1, 2, 4", missing: "impute", correlationThreshold: null };
+const P4S = { ...JOIN, ...SURV, outcomeKind: "survival", stratifySurvival: true, lockMode: "none", outerK: 5, innerK: 3, repeats: 2, kCandidates: "1, 2, 4", missing: "impute", correlationThreshold: null };
 const PRE = { dropConstant: true, correlationThreshold: 0.9 };
 const PDROP = { preUnpairedOn: true, preUnpairedAlpha: 0.05, preUnpairedThr: 0.2 };
 for (const [tag, m] of [["topk", { model: "topk" }], ["lasso", { model: "lasso", lassoRule: "min", lassoNLambda: 50 }]] as const) {

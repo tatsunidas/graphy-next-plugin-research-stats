@@ -13,7 +13,7 @@ import { parseLock } from "../src/core/pipeline/lockFile";
 import { DATASET_CHECK, P4_PIPELINE, R1_PROGNOSIS, R2_DISCRIMINATION, R5_MODEL, type P4State } from "../src/core/skills";
 import { multiRow, opts, roles } from "./helpers/multiRow";
 
-const p4 = { ...roles, outcomeKind: "binary", positiveLabel: "resp", outerK: 4, innerK: 3, repeats: 2, kCandidates: "1, 2", rowsMode: "asis" };
+const p4 = { ...roles, outcomeKind: "binary", positiveLabel: "resp", outerK: 4, innerK: 3, repeats: 2, kCandidates: "1, 2", rowsMode: "asis", correlationThreshold: null };
 const lastError = (r: { record: { steps: { errors: string[] }[] } }) => r.record.steps.flatMap((s) => s.errors).join(" / ");
 
 /** 独立に数える: どの分割でも、同じ患者が検証側と訓練側の両方にいない（割り当てだけから）。 */
