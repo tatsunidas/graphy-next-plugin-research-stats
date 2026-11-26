@@ -1165,7 +1165,7 @@ def check_p4():
                 same = a["tables"] == b["tables"] and a["extra"] == b["extra"]
                 rec(S, f"p4{kind}_{tag}.a.reproducible", "PASS" if same else "FAIL", f"同じ入力・シードで 2 回: 表と出力（分割・予測・選ばれた特徴量）が完全に同じ={same}", "完全一致")
     # 生存だけのモデル（Elastic Net・Ridge・Cox ブースティング）: 同じ検査（分割・折ごとの C-index を lifelines で再計算・予測の再現）と、入れ替え（負例）
-    for tag in ["enet", "ridge", "coxboost"]:
+    for tag in ["enet", "ridge", "coxboost", "rsf"]:
         rid = f"p4s_{tag}"
         if J(rid) is None:
             rec(S, f"{rid}.run", "UNMET", "json が無い"); continue

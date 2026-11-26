@@ -351,7 +351,7 @@ describe("wizard: preprocessing section", () => {
     await choose("rs-p4-model", "rf");
     expect(q("rs-p4-model-reset")).toBeNull();
     await choose("rs-p4-kind", "survival");
-    expect(opts()).toEqual(["topk", "lasso", "enet", "ridge", "coxboost"]); // 生存では RF・SVM・GBM は使えず、生存のモデルが出る
+    expect(opts()).toEqual(["topk", "lasso", "enet", "ridge", "coxboost", "rsf"]); // 生存では RF・SVM・GBM は使えず、生存のモデルが出る
     expect((q("rs-p4-model") as HTMLSelectElement).value).toBe("topk");
     expect(q("rs-p4-model-reset")!.textContent).toContain("ランダムフォレスト");
     // モデルごとの設定欄
@@ -362,6 +362,9 @@ describe("wizard: preprocessing section", () => {
     await choose("rs-p4-model", "ridge");
     expect(has("rs-p4-enet-alpha")).toBe(false);
     expect(has("rs-p4-lasso-rule")).toBe(true);
+    await choose("rs-p4-model", "rsf");
+    expect(has("rs-p4-rsf-trees") && has("rs-p4-rsf-mtry") && has("rs-p4-rsf-leaf")).toBe(true);
+    expect(has("rs-p4-cox-iter")).toBe(false);
     await choose("rs-p4-model", "coxboost");
     expect(has("rs-p4-cox-iter")).toBe(true);
     expect((q("rs-p4-cox-nu") as HTMLInputElement).value).toBe("0.1"); // 学習率の既定
